@@ -1,0 +1,34 @@
+# esp32-freertos
+
+ESP32 + FreeRTOS test projects, built against ESP-IDF.
+
+## Projects
+
+| Directory | What it does |
+|---|---|
+| [`freertos_test`](freertos_test/) | Minimal FreeRTOS hello-world |
+| [`bluetooth_test`](bluetooth_test/) | Classic Bluetooth device/service discovery demo |
+| [`dht11_temperature`](dht11_temperature/) | Reads temperature/humidity from a DHT11 sensor |
+| [`hw_verify`](hw_verify/) | Flashable firmware that checks DHT11, OLED (I2C), and an I2S mic are wired correctly on the breadboard, printing pass/fail results over serial |
+
+## Setup
+
+This repo does not include the ESP-IDF SDK itself (it's excluded via
+`.gitignore` since it's a large, separately-versioned checkout). Clone it
+alongside this repo:
+
+```bash
+git clone --recursive https://github.com/espressif/esp-idf.git
+./esp-idf/install.sh esp32
+```
+
+## Building and flashing a project
+
+```bash
+source /path/to/esp-idf/export.sh
+cd <project-directory>
+idf.py set-target esp32
+idf.py -p /dev/ttyUSB0 flash monitor   # Ctrl+] to exit monitor
+```
+
+See each project's own README for specifics (wiring, expected output, etc).
