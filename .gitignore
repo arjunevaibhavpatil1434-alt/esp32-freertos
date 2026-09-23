@@ -1,0 +1,12 @@
+# ESP-IDF SDK checkout - vendored separately, has its own git history
+/esp-idf/
+
+# Build outputs (regenerate with `idf.py build`)
+build/
+managed_components/
+dependencies.lock
+sdkconfig.old
+
+# Editor/OS cruft
+.vscode/
+.DS_Store
