@@ -7,5 +7,6 @@ from pytest_embedded_idf.utils import idf_parametrize
 
 @pytest.mark.generic
 @idf_parametrize('target', ['esp32'], indirect=['target'])
-def test_bt_discovery(dut: Dut) -> None:
-    dut.expect_exact('Discovery started.')
+def test_bt_spp_acceptor(dut: Dut) -> None:
+    dut.expect_exact("SPP server started")
+    dut.expect_exact("Discoverable as 'ESP32_SPP_ACCEPTOR'")
