@@ -252,6 +252,11 @@ static RingbufHandle_t m_rb = NULL;
 static i2s_chan_handle_t s_mic_rx_handle = NULL;
 static TaskHandle_t s_mic_feed_task = NULL;
 static bool s_mic_ready = false;
+/* The ring buffer lives for the whole run (deleting it on hang-up raced with
+ * mic_feed_task writing to it); these gate who may use it during a call. */
+static volatile bool s_audio_active = false;
+/* mSBC (wideband) wants 16kHz PCM, same as the mic; CVSD wants 8kHz. */
+static volatile bool s_audio_wideband = false;
 
 /* Lazily brought up on the first call's audio connection and left running;
  * simpler and safer than tearing I2S/resample state down and back up on
@@ -287,8 +292,8 @@ static void mic_lazy_init(void)
         return;
     }
 
-    /* Downsample our 16kHz/16bit/mono mic feed to the 8kHz/16bit/mono PCM
-     * that the internal CVSD codec expects. */
+    /* Downsampler from our 16kHz/16bit/mono mic feed to the 8kHz/16bit/mono
+     * PCM that the internal CVSD codec expects (skipped for mSBC calls). */
     if (esp_hf_client_pcm_resample_init(MIC_SAMPLE_RATE, 16, 1) != ESP_OK) {
         ESP_LOGE(BT_HF_TAG, "mic: pcm_resample_init failed");
         return;
@@ -306,7 +311,7 @@ static void mic_feed_task(void *arg)
     int16_t pcm_out[256];
 
     while (1) {
-        if (!m_rb || !s_mic_ready) {
+        if (!s_audio_active || !s_mic_ready) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -322,13 +327,18 @@ static void mic_feed_task(void *arg)
             pcm_in[i] = (int16_t)(i2s_raw[i] >> 16);
         }
 
-        int32_t out_samples = esp_hf_client_pcm_resample(pcm_in, n * sizeof(int16_t), pcm_out);
-        if (out_samples <= 0) {
-            continue;
+        const int16_t *out = pcm_in;
+        size_t out_bytes = n * sizeof(int16_t);
+        if (!s_audio_wideband) {
+            int32_t out_samples = esp_hf_client_pcm_resample(pcm_in, out_bytes, pcm_out);
+            if (out_samples <= 0) {
+                continue;
+            }
+            out = pcm_out;
+            out_bytes = out_samples * sizeof(int16_t);
         }
 
-        size_t out_bytes = out_samples * sizeof(int16_t);
-        if (!xRingbufferSend(m_rb, pcm_out, out_bytes, pdMS_TO_TICKS(20))) {
+        if (!xRingbufferSend(m_rb, out, out_bytes, pdMS_TO_TICKS(20))) {
             ESP_LOGW(BT_HF_TAG, "mic: rb send fail (call audio can't keep up)");
             continue;
         }
@@ -336,13 +346,29 @@ static void mic_feed_task(void *arg)
     }
 }
 
-static void bt_app_hf_client_audio_open(void)
+static void bt_app_hf_client_audio_open(bool wideband)
 {
-    m_rb = xRingbufferCreate(ESP_HFP_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (!m_rb) {
+        m_rb = xRingbufferCreate(ESP_HFP_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    }
 
     mic_lazy_init();
+    s_audio_wideband = wideband;
+    s_audio_active = true;
+    ESP_LOGI(BT_HF_TAG, "mic: streaming to call at %s", wideband ? "16kHz (mSBC)" : "8kHz (CVSD)");
+
     if (!s_mic_feed_task) {
         xTaskCreate(mic_feed_task, "mic_feed_task", 4096, NULL, 6, &s_mic_feed_task);
+    }
+}
+
+/* Drop whatever is left so the next call doesn't start with stale audio. */
+static void mic_rb_drain(void)
+{
+    size_t item_size;
+    void *item;
+    while ((item = xRingbufferReceiveUpTo(m_rb, &item_size, 0, ESP_HFP_RINGBUF_SIZE)) != NULL) {
+        vRingbufferReturnItem(m_rb, item);
     }
 }
 
@@ -352,14 +378,16 @@ static void bt_app_hf_client_audio_close(void)
         return ;
     }
 
-    vRingbufferDelete(m_rb);
-    m_rb = NULL;
-    /* mic_feed_task keeps running and just idles until the next call, see above */
+    s_audio_active = false;
+    /* mic_feed_task stops writing within one I2S read (<=100ms) and then
+     * idles until the next call; its last write may land after this drain,
+     * which is why audio_open doesn't assume an empty buffer either. */
+    mic_rb_drain();
 }
 
 static uint32_t bt_app_hf_client_outgoing_cb(uint8_t *p_buf, uint32_t sz)
 {
-    if (!m_rb) {
+    if (!m_rb || !s_audio_active) {
         return 0;
     }
 
@@ -474,7 +502,8 @@ void bt_app_hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
                 param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) {
                 esp_hf_client_register_data_callback(bt_app_hf_client_incoming_cb,
                                                     bt_app_hf_client_outgoing_cb);
-                bt_app_hf_client_audio_open();
+                bt_app_hf_client_audio_open(param->audio_stat.state ==
+                                            ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
             } else if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED) {
                 bt_app_hf_client_audio_close();
             }
