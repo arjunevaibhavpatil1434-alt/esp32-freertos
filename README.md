@@ -7,9 +7,11 @@ ESP32 + FreeRTOS test projects, built against ESP-IDF.
 | Directory | What it does |
 |---|---|
 | [`freertos_test`](freertos_test/) | Minimal FreeRTOS hello-world |
-| [`bluetooth_test`](bluetooth_test/) | Classic Bluetooth device/service discovery demo |
+| [`bluetooth_test`](bluetooth_test/) | Classic Bluetooth SPP server (`ESP32_SPP_ACCEPTOR`) with PIN/SSP pairing that echoes back whatever a phone serial terminal sends |
 | [`dht11_temperature`](dht11_temperature/) | Reads temperature/humidity from a DHT11 sensor |
 | [`hw_verify`](hw_verify/) | Flashable firmware that checks DHT11, OLED (I2C), and an I2S mic are wired correctly on the breadboard, printing pass/fail results over serial |
+| [`sensor_hub`](sensor_hub/) | DHT11 → OLED (LVGL) → Bluetooth SPP pipeline: shows readings on the OLED and pushes them to a paired phone every 5s (send `GET` for an immediate reading) |
+| [`hfp_mic_test`](hfp_mic_test/) | Bluetooth Hands-Free client that auto-connects to a known phone and feeds the I2S mic into calls, plus A2DP sink / AVRCP controls |
 
 ## Setup
 
