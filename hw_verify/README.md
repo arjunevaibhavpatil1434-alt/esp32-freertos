@@ -11,7 +11,7 @@ to confirm breadboard wiring without needing a camera on the setup.
 | DHT11 | DATA | GPIO4 | Single-wire, internal pull-up enabled by driver |
 | OLED (SSD1306/SH1106) | SDA | GPIO21 | I2C, detected at address `0x3C` |
 | OLED (SSD1306/SH1106) | SCL | GPIO22 | |
-| INMP441 mic | WS (word-select) | GPIO25 | |
+| INMP441 mic | WS (word-select) | GPIO33 | Was GPIO25; moved so GPIO25 (DAC) can drive the speaker in `hfp_mic_test` |
 | INMP441 mic | SCK (bit-clock) | GPIO26 | |
 | INMP441 mic | SD (data out) | GPIO32 | |
 | INMP441 mic | L/R | GND | Selects left channel; firmware reads `I2S_STD_SLOT_LEFT` |
@@ -26,6 +26,16 @@ across multiple rewiring attempts (bad row or bad jumper), even after
 swapping WS/SCK and reseating SD. Moving to WS=GPIO25, SCK=GPIO26, SD=GPIO32
 fixed it immediately — real signal with a power-on transient decaying to a
 steady noise floor. Avoid reusing GPIO5/18/19 breadboard rows for this mic.
+
+Later WS moved again, from GPIO25 to GPIO33, because GPIO25 is one of only
+two DAC pins and `hfp_mic_test` uses it for speaker output.
+
+## Speaker (hfp_mic_test only)
+
+| Component | Signal | ESP32 GPIO | Notes |
+|---|---|---|---|
+| Powered speaker, 3.5mm AUX in | TIP + RING | GPIO25 (DAC ch 0) | Through a 1–10µF DC-blocking cap (+ toward ESP32) and ~1kΩ series resistor |
+| Powered speaker, 3.5mm AUX in | SLEEVE | GND | |
 
 ## Running the test
 

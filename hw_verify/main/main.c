@@ -17,7 +17,7 @@
 #define OLED_SDA_GPIO   GPIO_NUM_21
 #define OLED_SCL_GPIO   GPIO_NUM_22
 
-#define MIC_WS_GPIO     GPIO_NUM_25  /* LRCL / word-select */
+#define MIC_WS_GPIO     GPIO_NUM_33  /* LRCL / word-select */
 #define MIC_SCK_GPIO    GPIO_NUM_26  /* BCLK / bit-clock   */
 #define MIC_SD_GPIO     GPIO_NUM_32  /* SD   / data out    */
 
