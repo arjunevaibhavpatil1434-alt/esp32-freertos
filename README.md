@@ -13,6 +13,10 @@ ESP32 + FreeRTOS test projects, built against ESP-IDF.
 | [`sensor_hub`](sensor_hub/) | DHT11 → OLED (LVGL) → Bluetooth SPP pipeline: shows readings on the OLED and pushes them to a paired phone every 5s (send `GET` for an immediate reading) |
 | [`hfp_mic_test`](hfp_mic_test/) | Bluetooth Hands-Free client that auto-connects to a known phone and feeds the I2S mic into calls, plus A2DP sink / AVRCP controls |
 
+For the full walkthrough (wiring, setup from scratch, every file, the
+Bluetooth profiles and audio pipelines, commands, test results and
+troubleshooting), see [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).
+
 ## Setup
 
 This repo does not include the ESP-IDF SDK itself (it's excluded via
