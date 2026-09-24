@@ -26,8 +26,8 @@ CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
 # Pairing alone (from the phone's Bluetooth settings) is NOT enough for
 # "Bluetooth" to show up as a selectable audio route during a call; the SLC
 # has to be up too. Update this if you pair a different phone.
-CONFIG_EXAMPLE_PEER_DEVICE_NAME="Narzo 50A"
+CONFIG_EXAMPLE_PEER_DEVICE_NAME="POCO F4"
 
 # Already-paired phone to connect to directly by address at startup (more
 # reliable than discovery, which only finds the phone in pairing mode).
-CONFIG_EXAMPLE_PEER_DEVICE_ADDR="f8:ad:24:e9:19:9e"
+CONFIG_EXAMPLE_PEER_DEVICE_ADDR="ac:1e:9e:f2:b1:c0"
