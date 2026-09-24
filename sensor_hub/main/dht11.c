@@ -10,6 +10,7 @@
 
 static const char *TAG = "DHT11";
 static gpio_num_t dht11_gpio;
+static portMUX_TYPE dht11_spinlock = portMUX_INITIALIZER_UNLOCKED;
 
 static int wait_for_level(int level)
 {
@@ -52,43 +53,57 @@ esp_err_t dht11_read(gpio_num_t gpio, dht11_data_t *data)
     gpio_set_level(dht11_gpio, 0);
     vTaskDelay(pdMS_TO_TICKS(20));
 
+    /* The response + 40-bit frame is ~4ms of microsecond-level timing. With
+     * the BT controller and LVGL running, an interrupt landing mid-frame makes
+     * us miss a ~50us LOW pulse, so run this part with interrupts masked and
+     * only log once we're out of the critical section. */
+    const char *fail_stage = NULL;
+    int fail_bit = -1;
+
+    portENTER_CRITICAL(&dht11_spinlock);
+
     gpio_set_level(dht11_gpio, 1);
     esp_rom_delay_us(30);
 
     gpio_set_direction(dht11_gpio, GPIO_MODE_INPUT);
 
     if (wait_for_level(0) < 0) {
-        ESP_LOGE(TAG, "No response LOW");
-        return ESP_FAIL;
+        fail_stage = "No response LOW";
+    } else if (wait_for_level(1) < 0) {
+        fail_stage = "No response HIGH";
+    } else if (wait_for_level(0) < 0) {
+        fail_stage = "No data start";
+    } else {
+        for (int i = 0; i < 40; i++) {
+            if (wait_for_level(1) < 0) {
+                fail_stage = "HIGH timeout";
+                fail_bit = i;
+                break;
+            }
+
+            esp_rom_delay_us(40);
+
+            if (gpio_get_level(dht11_gpio)) {
+                bits[i / 8] |= (1 << (7 - (i % 8)));
+            }
+
+            if (wait_for_level(0) < 0) {
+                fail_stage = "LOW timeout";
+                fail_bit = i;
+                break;
+            }
+        }
     }
 
-    if (wait_for_level(1) < 0) {
-        ESP_LOGE(TAG, "No response HIGH");
+    portEXIT_CRITICAL(&dht11_spinlock);
+
+    if (fail_stage) {
+        if (fail_bit >= 0) {
+            ESP_LOGE(TAG, "Bit %d %s", fail_bit, fail_stage);
+        } else {
+            ESP_LOGE(TAG, "%s", fail_stage);
+        }
         return ESP_FAIL;
-    }
-
-    if (wait_for_level(0) < 0) {
-        ESP_LOGE(TAG, "No data start");
-        return ESP_FAIL;
-    }
-
-    for (int i = 0; i < 40; i++) {
-
-        if (wait_for_level(1) < 0) {
-            ESP_LOGE(TAG, "Bit %d HIGH timeout", i);
-            return ESP_FAIL;
-        }
-
-        esp_rom_delay_us(40);
-
-        if (gpio_get_level(dht11_gpio)) {
-            bits[i / 8] |= (1 << (7 - (i % 8)));
-        }
-
-        if (wait_for_level(0) < 0) {
-            ESP_LOGE(TAG, "Bit %d LOW timeout", i);
-            return ESP_FAIL;
-        }
     }
 
     uint8_t checksum =
