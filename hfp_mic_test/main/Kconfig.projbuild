@@ -13,6 +13,16 @@ menu "HFP Example Configuration"
         help
             Use this option to set target device name to connect.
 
+    config EXAMPLE_PEER_DEVICE_ADDR
+        string "Target Device Address"
+        default ""
+        help
+            Bluetooth address of an already-paired phone to connect to directly
+            at startup, as "xx:xx:xx:xx:xx:xx" (shown in the "Pairing succeeded"
+            log line). Connecting by address is more reliable than discovery,
+            which only finds a phone while it's in pairing mode. Leave empty to
+            rely on discovery by Target Device Name only.
+
     config EXAMPLE_ENABLE_CONSOLE_REPL
         bool "Enable UART interactive console (REPL)"
         default y

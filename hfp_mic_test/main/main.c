@@ -33,16 +33,27 @@
 
 #define HF_INQUIRY_LEN 30
 
-/* Known phone from a prior pairing ("Narzo 50A") — connecting directly by
- * address is more reliable than inquiry-based discovery, which only finds
- * a phone while it's actively in pairing mode. Update this if you pair a
- * different phone (its address shows up in the "Pairing succeeded ... [xx:xx:...]"
- * log line). */
-esp_bd_addr_t peer_addr = {0xf8, 0xad, 0x24, 0xe9, 0x19, 0x9e};
+/* Filled from CONFIG_EXAMPLE_PEER_DEVICE_ADDR at startup, or by discovery. */
+esp_bd_addr_t peer_addr = {0};
 bool hf_client_connected = false;
 static char peer_bdname[ESP_BT_GAP_MAX_BDNAME_LEN + 1];
 static uint8_t peer_bdname_len;
 static const char remote_device_name[] = CONFIG_EXAMPLE_PEER_DEVICE_NAME;
+
+/* Parse "xx:xx:xx:xx:xx:xx" into bda; false (bda untouched) if malformed. */
+static bool parse_peer_addr(const char *str, esp_bd_addr_t bda)
+{
+    unsigned int b[ESP_BD_ADDR_LEN];
+    char trailing;
+    if (sscanf(str, "%2x:%2x:%2x:%2x:%2x:%2x%c",
+               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &trailing) != ESP_BD_ADDR_LEN) {
+        return false;
+    }
+    for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
+        bda[i] = (uint8_t)b[i];
+    }
+    return true;
+}
 static bool s_peer_device_found = false;
 
 static char *bda2str(esp_bd_addr_t bda, char *str, size_t size)
@@ -297,8 +308,14 @@ static void bt_hf_client_hdl_stack_evt(uint16_t event, void *p_param)
          * establishes the HFP service-level connection, which is what makes
          * "Bluetooth" selectable as a call audio route. Pairing alone isn't
          * enough. */
-        ESP_LOGI(BT_HF_TAG, "Connecting directly to known device...");
-        esp_hf_client_connect(peer_addr);
+        if (parse_peer_addr(CONFIG_EXAMPLE_PEER_DEVICE_ADDR, peer_addr)) {
+            ESP_LOGI(BT_HF_TAG, "Connecting directly to known device %s...",
+                     CONFIG_EXAMPLE_PEER_DEVICE_ADDR);
+            esp_hf_client_connect(peer_addr);
+        } else if (strlen(CONFIG_EXAMPLE_PEER_DEVICE_ADDR) > 0) {
+            ESP_LOGW(BT_HF_TAG, "Ignoring malformed peer address '%s' (want xx:xx:xx:xx:xx:xx)",
+                     CONFIG_EXAMPLE_PEER_DEVICE_ADDR);
+        }
 
         /* Also start discovery as a fallback, in case a different/unknown
          * phone is paired later. */
