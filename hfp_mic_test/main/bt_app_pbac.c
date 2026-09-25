@@ -11,6 +11,7 @@
 #include "esp_pbac_api.h"
 #include "bt_app_core.h"
 #include "bt_app_pbac.h"
+#include "contacts.h"
 
 #define BT_PBAC_TAG       "BT_PBAC"
 
@@ -33,18 +34,21 @@ void bt_app_pbac_cb(esp_pbac_event_t event, esp_pbac_param_t *param)
         /* if multiple PBA connection, we should check param->pull_phone_book_rsp.handle */
         ESP_LOGI(BT_PBAC_TAG, "PBA client pull phone book response, handle:%d, result: 0x%x", param->pull_phone_book_rsp.handle, param->pull_phone_book_rsp.result);
         if (param->pull_phone_book_rsp.result == ESP_PBAC_SUCCESS && param->pull_phone_book_rsp.data_len > 0) {
-            printf("%.*s\n", param->pull_phone_book_rsp.data_len, param->pull_phone_book_rsp.data);
-            /* copy data to other buff before return, if phone book size is too large, it will be sent in multiple response event */
+            /* Large phone books arrive over several responses; the parser keeps
+             * its place between them. Contacts are never logged. */
+            contacts_feed((const char *)param->pull_phone_book_rsp.data, param->pull_phone_book_rsp.data_len);
         }
         if (param->pull_phone_book_rsp.final) {
-            ESP_LOGI(BT_PBAC_TAG, "PBA client pull phone book final response");
+            ESP_LOGI(BT_PBAC_TAG, "PBA client pull phone book final response, %d contact numbers loaded%s",
+                     contacts_count(), contacts_full() ? " (out of memory, rest skipped)" : "");
             /* pull phone book done, now we can perform other operation */
             if (param->pull_phone_book_rsp.result == ESP_PBAC_SUCCESS && param->pull_phone_book_rsp.include_phone_book_size) {
                 ESP_LOGI(BT_PBAC_TAG, "Phone Book Size:%d", param->pull_phone_book_rsp.phone_book_size);
                 esp_pbac_pull_phone_book_app_param_t app_param = {0};
                 app_param.include_property_selector = 1;
-                /* property bit mask, filter out photo, refer to Phone Book Access Profile */
-                app_param.property_selector = 0xFFFFFFF7;
+                /* only VERSION, FN, N and TEL: all the caller display needs */
+                app_param.property_selector = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 7);
+                contacts_reset();
                 /* pull again, without 'max_list_count = 0', then we can get the entire phone book */
                 esp_pbac_pull_phone_book(pba_conn_handle, "telecom/pb.vcf", &app_param);
             }

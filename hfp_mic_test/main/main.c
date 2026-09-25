@@ -15,6 +15,7 @@
 #include "nvs_flash.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_bt.h"
 #include "bt_app_core.h"
 #include "esp_bt_main.h"
@@ -23,6 +24,9 @@
 #include "esp_hf_client_api.h"
 #include "esp_pbac_api.h"
 #include "bt_app_hf.h"
+#include "oled_status.h"
+#include "dht11.h"
+#include "touch_ctl.h"
 #include "bt_app_av.h"
 #if CONFIG_EXAMPLE_ENABLE_CONSOLE_REPL
 #include "esp_console.h"
@@ -33,7 +37,7 @@
 
 #define HF_INQUIRY_LEN 30
 
-/* Filled from CONFIG_EXAMPLE_PEER_DEVICE_ADDR at startup, or by discovery. */
+/* The phone we're talking to (or trying to); see pick_target(). */
 esp_bd_addr_t peer_addr = {0};
 bool hf_client_connected = false;
 static char peer_bdname[ESP_BT_GAP_MAX_BDNAME_LEN + 1];
@@ -55,6 +59,153 @@ static bool parse_peer_addr(const char *str, esp_bd_addr_t bda)
     return true;
 }
 static bool s_peer_device_found = false;
+static char *bda2str(esp_bd_addr_t bda, char *str, size_t size);
+
+/* ---- Reconnect to the phone we know: last used, else any bonded one ----
+ * At power-on, and after a link drops, page that phone every
+ * RECONNECT_INTERVAL_MS, RECONNECT_TRIES times; then stop and just stay
+ * connectable, so a phone the user disconnected on purpose isn't pulled
+ * back forever. Any phone can still pair or connect in at any time. */
+#define RECONNECT_INTERVAL_MS   15000
+#define RECONNECT_TRIES         8
+#define NVS_NS                  "bt_app"
+#define NVS_KEY_LAST_PEER       "last_peer"
+
+static bool s_have_target;
+static bool s_rotate_bonded;    /* no preferred phone: try each paired one in turn */
+static int s_bond_idx;
+static bool s_link_up;
+static int s_tries_left;
+static esp_timer_handle_t s_reconnect_timer;
+
+static void save_last_peer(const uint8_t *bda)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, NVS_KEY_LAST_PEER, bda, ESP_BD_ADDR_LEN);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static bool load_last_peer(esp_bd_addr_t bda)
+{
+    nvs_handle_t h;
+    size_t len = ESP_BD_ADDR_LEN;
+    bool ok = false;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        ok = nvs_get_blob(h, NVS_KEY_LAST_PEER, bda, &len) == ESP_OK && len == ESP_BD_ADDR_LEN;
+        nvs_close(h);
+    }
+    return ok;
+}
+
+static bool is_bonded(const esp_bd_addr_t bda)
+{
+    int n = esp_bt_gap_get_bond_device_num();
+    if (n <= 0) {
+        return false;
+    }
+    esp_bd_addr_t *list = malloc(n * sizeof(esp_bd_addr_t));
+    bool found = false;
+    if (list && esp_bt_gap_get_bond_device_list(&n, list) == ESP_OK) {
+        for (int i = 0; i < n && !found; i++) {
+            found = memcmp(list[i], bda, ESP_BD_ADDR_LEN) == 0;
+        }
+    }
+    free(list);
+    return found;
+}
+
+/* The idx-th paired phone, wrapping around the bond list. */
+static bool nth_bonded(int idx, esp_bd_addr_t bda)
+{
+    int n = esp_bt_gap_get_bond_device_num();
+    if (n <= 0) {
+        return false;
+    }
+    esp_bd_addr_t *list = malloc(n * sizeof(esp_bd_addr_t));
+    bool ok = list && esp_bt_gap_get_bond_device_list(&n, list) == ESP_OK && n > 0;
+    if (ok) {
+        memcpy(bda, list[idx % n], ESP_BD_ADDR_LEN);
+    }
+    free(list);
+    return ok;
+}
+
+/* Configured address, else the last phone that connected (if still
+ * paired), else each paired phone in turn. False: nobody paired yet. */
+static bool pick_target(esp_bd_addr_t bda, const char **why)
+{
+    if (parse_peer_addr(CONFIG_EXAMPLE_PEER_DEVICE_ADDR, bda)) {
+        *why = "configured";
+        return true;
+    }
+    if (strlen(CONFIG_EXAMPLE_PEER_DEVICE_ADDR) > 0) {
+        ESP_LOGW(BT_HF_TAG, "Ignoring malformed peer address '%s' (want xx:xx:xx:xx:xx:xx)",
+                 CONFIG_EXAMPLE_PEER_DEVICE_ADDR);
+    }
+    if (load_last_peer(bda) && is_bonded(bda)) {
+        *why = "last used";
+        return true;
+    }
+    if (nth_bonded(0, bda)) {
+        *why = "paired";
+        s_rotate_bonded = true;
+        return true;
+    }
+    return false;
+}
+
+/* Each try arms the timer for the next: a phone that is off or out of range
+ * doesn't always produce a disconnect event to retry from. */
+static void try_reconnect(void)
+{
+    if (s_link_up || !s_have_target) {
+        return;
+    }
+    if (s_tries_left <= 0) {
+        ESP_LOGI(BT_HF_TAG, "Phone not reachable; waiting for it to connect");
+        return;
+    }
+    s_tries_left--;
+    if (s_rotate_bonded) {
+        nth_bonded(s_bond_idx++, peer_addr);
+    }
+    char str[18];
+    ESP_LOGI(BT_HF_TAG, "Connecting to %s (%d tries left)...",
+             bda2str(peer_addr, str, sizeof(str)), s_tries_left);
+    esp_hf_client_connect(peer_addr);
+    esp_timer_stop(s_reconnect_timer);
+    esp_timer_start_once(s_reconnect_timer, RECONNECT_INTERVAL_MS * 1000ULL);
+}
+
+static void reconnect_timer_cb(void *arg)
+{
+    try_reconnect();
+}
+
+void bt_app_peer_connected(const uint8_t *bda)
+{
+    s_link_up = true;
+    s_have_target = true;
+    s_rotate_bonded = false;    /* from now on this phone is the one to reconnect */
+    memcpy(peer_addr, bda, ESP_BD_ADDR_LEN);
+    save_last_peer(bda);
+    esp_timer_stop(s_reconnect_timer);
+}
+
+void bt_app_peer_disconnected(void)
+{
+    if (!s_link_up) {
+        return;     /* a failed attempt; the timer already has the next one */
+    }
+    /* a live link dropped: start a fresh round of retries */
+    s_link_up = false;
+    s_tries_left = RECONNECT_TRIES;
+    esp_timer_stop(s_reconnect_timer);
+    esp_timer_start_once(s_reconnect_timer, RECONNECT_INTERVAL_MS * 1000ULL);
+}
 
 static char *bda2str(esp_bd_addr_t bda, char *str, size_t size)
 {
@@ -188,6 +339,28 @@ enum {
     BT_APP_EVT_STACK_UP = 0,
 };
 
+#define DHT11_GPIO        GPIO_NUM_4
+#define DHT11_PERIOD_MS   5000    /* the sensor itself allows one read per ~2 s */
+
+/* Feeds the display. Pinned to core 1: a read masks interrupts for ~4 ms,
+ * which must not land on core 0 where the Bluetooth controller runs. */
+static void dht_task(void *arg)
+{
+    dht11_init(DHT11_GPIO);
+    int fails = 0;
+    while (1) {
+        dht11_data_t d;
+        if (dht11_read(DHT11_GPIO, &d) == ESP_OK) {
+            g_stat_temp_c = d.temperature;
+            g_stat_humidity = d.humidity;
+            fails = 0;
+        } else if (++fails == 3) {
+            ESP_LOGW(BT_HF_TAG, "DHT11: 3 reads in a row failed - check GPIO%d wiring", DHT11_GPIO);
+        }
+        vTaskDelay(pdMS_TO_TICKS(DHT11_PERIOD_MS));
+    }
+}
+
 /* handler for bluetooth stack enabled events */
 static void bt_hf_client_hdl_stack_evt(uint16_t event, void *p_param);
 
@@ -228,6 +401,10 @@ void app_main(void)
         ESP_LOGE(BT_HF_TAG, "%s enable bluedroid failed: %s", __func__, esp_err_to_name(ret));
         return;
     }
+
+    oled_status_start();
+    xTaskCreatePinnedToCore(dht_task, "dht11", 3072, NULL, 3, NULL, 1);
+    touch_ctl_start();
 
     ESP_LOGI(BT_HF_TAG, "Own address:[%s]", bda2str((uint8_t *)esp_bt_dev_get_address(), bda_str, sizeof(bda_str)));
     /* create application task */
@@ -272,9 +449,7 @@ static void bt_hf_client_hdl_stack_evt(uint16_t event, void *p_param)
     ESP_LOGD(BT_HF_TAG, "%s evt %d", __func__, event);
     switch (event) {
     case BT_APP_EVT_STACK_UP: {
-        /* set up device name */
-        char *dev_name = "ESP_HFP_HF";
-        esp_bt_gap_set_device_name(dev_name);
+        esp_bt_gap_set_device_name(CONFIG_EXAMPLE_LOCAL_DEVICE_NAME);
 
         /* register GAP callback function */
         esp_bt_gap_register_callback(esp_bt_gap_cb);
@@ -304,23 +479,34 @@ static void bt_hf_client_hdl_stack_evt(uint16_t event, void *p_param)
         /* set discoverable and connectable mode, wait to be connected */
         esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
 
-        /* Connect directly to the known phone by address — this actually
-         * establishes the HFP service-level connection, which is what makes
-         * "Bluetooth" selectable as a call audio route. Pairing alone isn't
-         * enough. */
-        if (parse_peer_addr(CONFIG_EXAMPLE_PEER_DEVICE_ADDR, peer_addr)) {
-            ESP_LOGI(BT_HF_TAG, "Connecting directly to known device %s...",
-                     CONFIG_EXAMPLE_PEER_DEVICE_ADDR);
-            esp_hf_client_connect(peer_addr);
-        } else if (strlen(CONFIG_EXAMPLE_PEER_DEVICE_ADDR) > 0) {
-            ESP_LOGW(BT_HF_TAG, "Ignoring malformed peer address '%s' (want xx:xx:xx:xx:xx:xx)",
-                     CONFIG_EXAMPLE_PEER_DEVICE_ADDR);
+        /* Connecting by address is what brings up the HFP service-level
+         * connection that makes "Bluetooth" a call audio route; pairing
+         * alone isn't enough. */
+        const esp_timer_create_args_t timer_args = {
+            .callback = reconnect_timer_cb,
+            .name = "bt_reconnect",
+        };
+        esp_timer_create(&timer_args, &s_reconnect_timer);
+        const char *why = NULL;
+        if (pick_target(peer_addr, &why)) {
+            char str[18];
+            ESP_LOGI(BT_HF_TAG, "Reconnect target: %s phone%s %s", why,
+                     s_rotate_bonded ? "s, starting with" : "", bda2str(peer_addr, str, sizeof(str)));
+            s_have_target = true;
+            s_tries_left = RECONNECT_TRIES;
+            try_reconnect();
+            /* No discovery alongside: a looping inquiry hogs the radio and
+             * starves both this page and the phone connecting in. */
+            break;
         }
 
-        /* Also start discovery as a fallback, in case a different/unknown
-         * phone is paired later. */
-        ESP_LOGI(BT_HF_TAG, "Starting device discovery...");
-        esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, HF_INQUIRY_LEN, 0);
+        if (strlen(CONFIG_EXAMPLE_PEER_DEVICE_NAME) > 0) {
+            ESP_LOGI(BT_HF_TAG, "No paired phone; discovering \"%s\"...", CONFIG_EXAMPLE_PEER_DEVICE_NAME);
+            esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, HF_INQUIRY_LEN, 0);
+        } else {
+            ESP_LOGI(BT_HF_TAG, "No paired phone yet; pair with \"%s\" from the phone",
+                     CONFIG_EXAMPLE_LOCAL_DEVICE_NAME);
+        }
         break;
     }
     default:

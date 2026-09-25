@@ -13,6 +13,9 @@
 
 #include "bt_app_core.h"
 #include "bt_app_hf.h"
+#include "oled_status.h"
+#include "spk_i2s.h"
+#include "contacts.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
@@ -28,24 +31,19 @@
 #include "sys/time.h"
 #include "sdkconfig.h"
 #include "driver/i2s_std.h"
-#include "driver/dac_continuous.h"
 
-/* Verified mic pinout — see hw_verify/README.md. WS moved off GPIO25 so the
- * DAC can use it for the speaker. */
+/* Verified mic pinout — see hw_verify/README.md. */
 #define MIC_WS_GPIO       GPIO_NUM_33
 #define MIC_SCK_GPIO      GPIO_NUM_26
 #define MIC_SD_GPIO       GPIO_NUM_32
 #define MIC_SAMPLE_RATE   16000
-/* On ESP32 the DAC's DMA always takes I2S0, so the mic must use I2S1. */
 #define MIC_I2S_PORT      I2S_NUM_1
 
-/* Far-end call audio out of the built-in 8-bit DAC on GPIO25 (DAC channel 0),
- * into a powered speaker's AUX input through a DC-blocking capacitor. The
- * default clock can't go below 19.6kHz, so use APLL to run at exactly 16kHz;
- * 8kHz (CVSD) calls are upsampled by repeating each sample. */
+/* Far-end call audio to the MAX98357A (spk_i2s.c) at 16kHz; 8kHz (CVSD)
+ * calls are upsampled by repeating each sample. */
 #define SPK_SAMPLE_RATE   16000
-#define SPK_RINGBUF_SIZE  4096   /* 8-bit samples: ~250ms at 16kHz */
-#define SPK_CHUNK         256
+#define SPK_RINGBUF_SIZE  8192   /* 16-bit samples: ~250ms at 16kHz */
+#define SPK_CHUNK         256    /* samples */
 
 const char *c_hf_evt_str[] = {
     "CONNECTION_STATE_EVT",              /*!< connection state changed event */
@@ -270,6 +268,7 @@ static volatile bool s_audio_active = false;
 /* mSBC (wideband) wants 16kHz PCM, same as the mic; CVSD wants 8kHz. */
 static volatile bool s_audio_wideband = false;
 
+
 /* Lazily brought up on the first call's audio connection and left running;
  * simpler and safer than tearing I2S/resample state down and back up on
  * every single call. */
@@ -358,62 +357,49 @@ static void mic_feed_task(void *arg)
     }
 }
 
-static dac_continuous_handle_t s_spk_handle = NULL;
 static RingbufHandle_t s_spk_rb = NULL;
 static TaskHandle_t s_spk_task = NULL;
+static volatile bool s_spk_ready = false;
 
-/* Same lazy, never-torn-down lifecycle as the mic. */
+/* Same lazy, never-torn-down lifecycle as the mic. The rate is set on every
+ * call, since music may have left the amp at 44.1/48kHz. */
 static void spk_lazy_init(void)
 {
-    if (s_spk_handle) {
-        return;
-    }
-
-    s_spk_rb = xRingbufferCreate(SPK_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
     if (!s_spk_rb) {
-        ESP_LOGE(BT_HF_TAG, "spk: ring buffer alloc failed");
-        return;
+        s_spk_rb = xRingbufferCreate(SPK_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+        if (!s_spk_rb) {
+            ESP_LOGE(BT_HF_TAG, "spk: ring buffer alloc failed");
+            return;
+        }
     }
-
-    dac_continuous_config_t cfg = {
-        .chan_mask = DAC_CHANNEL_MASK_CH0,  /* GPIO25 */
-        .desc_num = 4,
-        .buf_size = SPK_CHUNK,
-        .freq_hz = SPK_SAMPLE_RATE,
-        .offset = 0,
-        .clk_src = DAC_DIGI_CLK_SRC_APLL,
-        .chan_mode = DAC_CHANNEL_MODE_SIMUL,
-    };
-    dac_continuous_handle_t handle = NULL;
-    if (dac_continuous_new_channels(&cfg, &handle) != ESP_OK ||
-        dac_continuous_enable(handle) != ESP_OK) {
-        ESP_LOGE(BT_HF_TAG, "spk: DAC init failed");
-        return;
-    }
-    s_spk_handle = handle;
-    ESP_LOGI(BT_HF_TAG, "spk: DAC ready on GPIO25 at %d Hz", SPK_SAMPLE_RATE);
+    s_spk_ready = spk_i2s_set_rate(SPK_SAMPLE_RATE);
 }
 
-/* Keeps the DAC fed during a call: far-end audio when there is some,
- * mid-scale silence otherwise, so underruns are quiet rather than clicks. */
+bool bt_app_hf_audio_active(void)
+{
+    return s_audio_active;
+}
+
+/* Keeps the amp fed during a call: far-end audio when there is some,
+ * silence otherwise, so underruns are quiet rather than clicks. */
 static void spk_play_task(void *arg)
 {
-    uint8_t silence[SPK_CHUNK];
-    memset(silence, 128, sizeof(silence));
+    int16_t silence[SPK_CHUNK] = {0};
 
     while (1) {
-        if (!s_audio_active || !s_spk_handle) {
+        if (!s_audio_active || !s_spk_ready) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
 
         size_t len = 0;
-        uint8_t *data = xRingbufferReceiveUpTo(s_spk_rb, &len, pdMS_TO_TICKS(10), SPK_CHUNK);
+        uint8_t *data = xRingbufferReceiveUpTo(s_spk_rb, &len, pdMS_TO_TICKS(10),
+                                               SPK_CHUNK * sizeof(int16_t));
         if (data) {
-            dac_continuous_write(s_spk_handle, data, len, NULL, -1);
+            spk_i2s_write((const int16_t *)data, len / sizeof(int16_t), portMAX_DELAY);
             vRingbufferReturnItem(s_spk_rb, data);
         } else {
-            dac_continuous_write(s_spk_handle, silence, sizeof(silence), NULL, -1);
+            spk_i2s_write(silence, SPK_CHUNK, portMAX_DELAY);
         }
     }
 }
@@ -427,6 +413,8 @@ static void bt_app_hf_client_audio_open(bool wideband)
     mic_lazy_init();
     s_audio_wideband = wideband;
     s_audio_active = true;
+    g_stat_wideband = wideband;
+    g_stat_audio = true;
     ESP_LOGI(BT_HF_TAG, "mic: streaming to call at %s", wideband ? "16kHz (mSBC)" : "8kHz (CVSD)");
 
     if (!s_mic_feed_task) {
@@ -456,6 +444,7 @@ static void bt_app_hf_client_audio_close(void)
     }
 
     s_audio_active = false;
+    g_stat_audio = false;
     /* mic_feed_task stops writing within one I2S read (<=100ms) and then
      * idles until the next call; its last write may land after this drain,
      * which is why audio_open doesn't assume an empty buffer either. */
@@ -492,8 +481,8 @@ static uint32_t bt_app_hf_client_outgoing_cb(uint8_t *p_buf, uint32_t sz)
 }
 
 /* Call audio arriving from the phone (the other party's voice): 16-bit
- * signed PCM at 16kHz (mSBC) or 8kHz (CVSD). Convert to the DAC's 8-bit
- * unsigned format at 16kHz and queue it for spk_play_task. Runs in the BT
+ * signed PCM at 16kHz (mSBC) or 8kHz (CVSD). Bring it to 16kHz and queue
+ * it for spk_play_task. Runs in the BT
  * stack's context, so never block here; drop audio if the queue is full. */
 static void bt_app_hf_client_incoming_cb(const uint8_t *buf, uint32_t sz)
 {
@@ -504,16 +493,15 @@ static void bt_app_hf_client_incoming_cb(const uint8_t *buf, uint32_t sz)
     const int16_t *pcm = (const int16_t *)buf;
     uint32_t n = sz / sizeof(int16_t);
     int repeat = s_audio_wideband ? 1 : 2;
-    uint8_t out[SPK_CHUNK];
+    int16_t out[SPK_CHUNK];
     uint32_t out_len = 0;
 
     for (uint32_t i = 0; i < n; i++) {
-        uint8_t u8 = (uint8_t)((pcm[i] >> 8) + 128);
         for (int r = 0; r < repeat; r++) {
-            out[out_len++] = u8;
+            out[out_len++] = pcm[i];
         }
-        if (out_len > sizeof(out) - 2 || i == n - 1) {
-            if (!xRingbufferSend(s_spk_rb, out, out_len, 0)) {
+        if (out_len > SPK_CHUNK - 2 || i == n - 1) {
+            if (!xRingbufferSend(s_spk_rb, out, out_len * sizeof(int16_t), 0)) {
                 static uint32_t dropped = 0;
                 if ((dropped++ % 50) == 0) {
                     ESP_LOGW(BT_HF_TAG, "spk: queue full, dropping far-end audio");
@@ -527,6 +515,25 @@ static void bt_app_hf_client_incoming_cb(const uint8_t *buf, uint32_t sz)
 #endif /* CONFIG_BT_HFP_USE_EXTERNAL_CODEC */
 
 #endif /* #if CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI */
+
+/* Shows the caller: contact name when the phonebook has the number. */
+static void show_caller(const char *number)
+{
+    char name[40];
+    if (!number || !number[0]) {
+        return;
+    }
+    bool found = contacts_lookup(number, name, sizeof(name));
+    ESP_LOGI(BT_HF_TAG, "caller %s", found ? "found in contacts" : "not in contacts");
+    oled_status_set_caller(found ? name : NULL, number);
+}
+
+static void clear_caller_if_idle(void)
+{
+    if (!g_stat_in_call && !g_stat_ringing && !g_stat_outgoing) {
+        oled_status_set_caller(NULL, NULL);
+    }
+}
 
 /* callback for HF_CLIENT */
 void bt_app_hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_t *param)
@@ -545,12 +552,17 @@ void bt_app_hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
                     param->conn_stat.peer_feat,
                     param->conn_stat.chld_feat);
             memcpy(peer_addr,param->conn_stat.remote_bda,ESP_BD_ADDR_LEN);
+            g_stat_slc = param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED;
             if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED) {
+                bt_app_peer_connected(param->conn_stat.remote_bda);
                 esp_pbac_connect(peer_addr);
             } else if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_CONNECTED) {
                 hf_client_connected = true;
             } else if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED) {
                 hf_client_connected = false;
+                g_stat_in_call = g_stat_ringing = g_stat_outgoing = false;
+                oled_status_set_caller(NULL, NULL);
+                bt_app_peer_disconnected();
             }
             break;
         }
@@ -666,6 +678,8 @@ void bt_app_hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
         {
             ESP_LOGI(BT_HF_TAG, "--Call indicator %s",
                     c_call_str[param->call.status]);
+            g_stat_in_call = param->call.status == ESP_HF_CALL_STATUS_CALL_IN_PROGRESS;
+            clear_caller_if_idle();
             break;
         }
 
@@ -673,6 +687,14 @@ void bt_app_hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
         {
             ESP_LOGI(BT_HF_TAG, "--Call setup indicator %s",
                     c_call_setup_str[param->call_setup.status]);
+            g_stat_ringing = param->call_setup.status == ESP_HF_CALL_SETUP_STATUS_INCOMING;
+            g_stat_outgoing = param->call_setup.status == ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING ||
+                              param->call_setup.status == ESP_HF_CALL_SETUP_STATUS_OUTGOING_ALERTING;
+            if (param->call_setup.status == ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING) {
+                /* no CLIP for outgoing calls; ask the phone for the number */
+                esp_hf_client_query_current_calls();
+            }
+            clear_caller_if_idle();
             break;
         }
 
@@ -694,6 +716,7 @@ void bt_app_hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
         {
             ESP_LOGI(BT_HF_TAG, "--clip number %s",
                     (param->clip.number == NULL) ? "NULL" : (param->clip.number));
+            show_caller(param->clip.number);
             break;
         }
 
@@ -712,6 +735,7 @@ void bt_app_hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
                     c_call_state_str[param->clcc.status],
                     c_call_mpty_type_str[param->clcc.mpty],
                     (param->clcc.number == NULL) ? "NULL" : (param->clcc.number));
+            show_caller(param->clcc.number);
             break;
         }
 
