@@ -18,6 +18,11 @@ To test a finished board end to end (build, hardware check, product boot,
 and optionally phone/music/touch/call), run `python tools/product_test.py`
 from an ESP-IDF shell; reports land in `test_reports/`.
 
+For the finished product (the `hfp_mic_test` headset): wiring, setup,
+flashing, operation, Bluetooth profiles, data pipelines, every source file
+explained with its code, configuration and testing, see
+[docs/PRODUCT_GUIDE.md](docs/PRODUCT_GUIDE.md).
+
 For the full walkthrough (wiring, setup from scratch, every file, the
 Bluetooth profiles and audio pipelines, commands, test results and
 troubleshooting), see [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).
