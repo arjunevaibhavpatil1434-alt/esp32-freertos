@@ -1,0 +1,33 @@
+# Classic BT, Hands-Free Profile client (HF role), no BLE
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLE_ENABLED=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=1
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_HFP_ENABLE=y
+CONFIG_BT_HFP_CLIENT_ENABLE=y
+CONFIG_BT_PBAC_ENABLED=y
+
+# A2DP sink (music streaming) + AVRCP controller (play/pause/next/prev,
+# track metadata) alongside the HFP call/mic pipeline above. No speaker is
+# wired up, so incoming A2DP audio is just byte-counted, not played.
+CONFIG_BT_A2DP_ENABLE=y
+
+# Voice-over-HCI audio datapath (app-layer access to audio), internal CVSD
+# codec (not external-codec mode) so we can feed our own I2S mic samples
+# in through esp_hf_client_register_data_callback() instead of routing
+# audio through fixed PCM GPIO pins wired to a hardware codec we don't have.
+CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
+
+# Auto-connect target: the ESP32 scans for a device by this exact Bluetooth
+# name and, once found, calls esp_hf_client_connect() on it automatically —
+# this is what actually establishes the HFP service-level connection (SLC).
+# Pairing alone (from the phone's Bluetooth settings) is NOT enough for
+# "Bluetooth" to show up as a selectable audio route during a call; the SLC
+# has to be up too. Update this if you pair a different phone.
+CONFIG_EXAMPLE_PEER_DEVICE_NAME="POCO F4"
+
+# Already-paired phone to connect to directly by address at startup (more
+# reliable than discovery, which only finds the phone in pairing mode).
+CONFIG_EXAMPLE_PEER_DEVICE_ADDR="ac:1e:9e:f2:b1:c0"
