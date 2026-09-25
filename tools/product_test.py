@@ -85,7 +85,10 @@ class Report:
                     "this report (kept locally, not in git) have the full serial output.\n\n")
             f.write(f"- Date: {started:%Y-%m-%d %H:%M}\n")
             f.write(f"- Firmware: `{rev}`{' (with uncommitted changes)' if dirty else ''}\n")
-            f.write(f"- Mode: {'interactive' if args.interactive else 'automatic'}\n")
+            mode = "interactive" if args.interactive else "automatic"
+            if args.interactive and args.skip_touch:
+                mode += ", touch skipped (calls answered on the phone)"
+            f.write(f"- Mode: {mode}\n")
             f.write(f"- Port: `{args.port}`\n")
             f.write(f"- Result: **{'FAIL' if self.failed else 'PASS'}** "
                     f"({sum(r[2] == PASS for r in self.rows)} passed, {len(self.failed)} failed, "
@@ -226,6 +229,28 @@ def ask(question):
             return a == "y"
 
 
+DEFERRED = []       # (stage, check, question) asked at the end with --defer-questions
+DEFER = False
+TIMEOUT_SCALE = 1   # --defer-questions: the tester follows a written sequence at their own pace
+
+
+def ask_check(report, stage, check, question):
+    """A pass/fail only a person can judge: ask now, or at the end."""
+    if DEFER:
+        DEFERRED.append((stage, check, question))
+        print(f"  [....] {check}  (asked at the end)")
+    else:
+        report.add(stage, check, PASS if ask(question) else FAIL)
+
+
+def ask_deferred(report):
+    if not DEFERRED:
+        return
+    print("\n== Questions ==")
+    for stage, check, question in DEFERRED:
+        report.add(stage, check, PASS if ask(question) else FAIL)
+
+
 def step(text):
     print(f"\n  >>> {text}")
 
@@ -258,8 +283,8 @@ def stage_hardware(args, report):
     report.add(stage, "speaker -> mic loopback", INFO,
                loop.split("->")[-1].strip() if loop else "no result (needs mic near speaker)")
     if args.interactive:
-        report.add(stage, "1 kHz beep heard (1 s on / 1 s off)",
-                   PASS if ask("Did you hear a beep, 1 s on and 1 s off?") else FAIL)
+        ask_check(report, stage, "1 kHz beep heard (1 s on / 1 s off)",
+                  "During the hardware check, did you hear a beep, 1 s on and 1 s off?")
     else:
         report.add(stage, "1 kHz beep heard", SKIP, "needs a listener: run with --interactive")
 
@@ -303,9 +328,11 @@ def stage_phone(args, report, con):
     print("\n== Stage 4: phone, music, touch, call (interactive) ==")
 
     def expect(check, pattern, timeout, instruction=None):
+        timeout *= TIMEOUT_SCALE
         if instruction:
             step(instruction)
-        con.drain()
+        if not DEFER:
+            con.drain()
         l = con.wait_for(pattern, timeout)
         report.add(stage, check, PASS if l else FAIL, "" if l else f"not seen within {timeout} s")
         return l is not None
@@ -323,18 +350,22 @@ def stage_phone(args, report, con):
         title = con.last(r"AVRCP Title: (?!unknow)") or con.wait_for(r"AVRCP Title: (?!unknow)", 10)
         report.add(stage, "song title received", PASS if title else FAIL,
                    title.split("Title:")[-1].strip() if title else "")
-        report.add(stage, "music heard from the speaker",
-                   PASS if ask("Do you hear the song from the board's speaker?") else FAIL)
-        report.add(stage, "title shown on the display",
-                   PASS if ask("Does the display show MUSIC and the song title?") else FAIL)
-        expect("touch tap pauses music", r"TOUCH: tap -> pause music", 60,
-               "TAP the touch pad once (touch and lift within 1 s)")
-        expect("touch tap plays music", r"TOUCH: tap -> play music", 60,
-               "TAP the touch pad again to resume")
+        ask_check(report, stage, "music heard from the speaker",
+                  "Did the song play from the board's speaker?")
+        ask_check(report, stage, "title shown on the display",
+                  "Did the display show MUSIC and the song title?")
+        if args.skip_touch:
+            report.add(stage, "touch pause / play", SKIP, "--skip-touch")
+        else:
+            expect("touch tap pauses music", r"TOUCH: tap -> pause music", 60,
+                   "TAP the touch pad once (touch and lift within 1 s)")
+            expect("touch tap plays music", r"TOUCH: tap -> play music", 60,
+                   "TAP the touch pad again to resume")
 
     step("Pause the music, then CALL this phone from another phone (waiting up to 3 min)")
-    con.drain()
-    ring = con.wait_for(r"Call setup indicator INCOMING", 180)
+    if not DEFER:
+        con.drain()
+    ring = con.wait_for(r"Call setup indicator INCOMING", 180 * TIMEOUT_SCALE)
     report.add(stage, "incoming call seen", PASS if ring else FAIL)
     if not ring:
         report.add(stage, "call tests", SKIP, "no incoming call")
@@ -343,26 +374,39 @@ def stage_phone(args, report, con):
     report.add(stage, "caller number received", PASS if clip else FAIL)
     name = con.last(r"caller (found|not) in contacts")
     report.add(stage, "caller name lookup", INFO, name.split("BT_HF: ")[-1] if name else "no result")
-    report.add(stage, "display shows INCOMING CALL and the caller",
-               PASS if ask("Does the display show INCOMING CALL and the number or name?") else FAIL)
+    ask_check(report, stage, "display shows INCOMING CALL and the caller",
+              "When the call rang, did the display show INCOMING CALL and the number or name?")
 
-    if expect("touch tap answers", r"TOUCH: tap -> answer call", 30,
-              "TAP the touch pad to ANSWER"):
-        audio = con.wait_for(r"audio state connected", 10)
+    if args.skip_touch:
+        answered = expect("call answered on the phone", r"Call indicator call in progress", 60,
+                          "ANSWER the call on the phone")
+    else:
+        answered = expect("touch tap answers", r"TOUCH: tap -> answer call", 30,
+                          "TAP the touch pad to ANSWER")
+    if answered:
+        audio = con.last(r"audio state connected") or con.wait_for(r"audio state connected", 10)
         report.add(stage, "call audio link up", PASS if audio else FAIL,
                    audio.split("audio state")[-1].strip() if audio else "")
-        report.add(stage, "caller heard on the speaker",
-                   PASS if ask("Can you hear the caller from the board's speaker?") else FAIL)
-        report.add(stage, "caller hears the board's mic",
-                   PASS if ask("Can the caller hear you through the board's mic?") else FAIL)
+        ask_check(report, stage, "caller heard on the speaker",
+                  "During the call, could you hear the caller from the board's speaker?")
+        ask_check(report, stage, "caller hears the board's mic",
+                  "During the call, could the caller hear you through the board's mic?")
+        if args.skip_touch:
+            expect("call ended", r"Call indicator NO call in progress", 60,
+                   "HANG UP on the phone")
+            report.add(stage, "touch long press rejects", SKIP, "--skip-touch")
+            return
         expect("touch tap hangs up", r"TOUCH: tap -> hang up", 60,
                "TAP the touch pad to HANG UP")
         ended = con.wait_for(r"Call indicator NO call in progress", 10)
         report.add(stage, "call ended", PASS if ended else FAIL)
+    elif args.skip_touch:
+        return
 
     step("CALL this phone once more; this time LONG-PRESS the pad (1 s) to reject (waiting up to 3 min)")
-    con.drain()
-    if con.wait_for(r"Call setup indicator INCOMING", 180):
+    if not DEFER:
+        con.drain()
+    if con.wait_for(r"Call setup indicator INCOMING", 180 * TIMEOUT_SCALE):
         expect("touch long press rejects", r"TOUCH: long press -> reject call", 30)
     else:
         report.add(stage, "touch long press rejects", SKIP, "no second call")
@@ -374,6 +418,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default="/dev/ttyUSB0")
     ap.add_argument("--interactive", action="store_true", help="also run the phone/listening tests")
+    ap.add_argument("--defer-questions", action="store_true",
+                    help="with --interactive: follow the sequence at your own pace, answer all "
+                         "yes/no questions at the end (for running the test remotely)")
+    ap.add_argument("--skip-touch", action="store_true",
+                    help="with --interactive: answer / hang up on the phone, skip the touch steps")
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument("--skip-hardware", action="store_true", help="skip the pipeline_check stage")
     ap.add_argument("--report", help="report path (default test_reports/product_test_<date>.md)")
@@ -384,6 +433,9 @@ def main():
     if not os.path.exists(args.port):
         sys.exit(f"{args.port} not found: is the board plugged in?")
 
+    global DEFER, TIMEOUT_SCALE
+    if args.defer_questions:
+        DEFER, TIMEOUT_SCALE = True, 3
     started = datetime.datetime.now()
     report = Report()
     global LOG_BASE
@@ -407,6 +459,7 @@ def main():
             report.add("phone", "phone, music, touch, call", SKIP, "run with --interactive")
         con.close()
         save_log(con, "product")
+    ask_deferred(report)
 
     report.write(path, args, started)
     print(f"RESULT: {'FAIL' if report.failed else 'PASS'} "

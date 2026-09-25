@@ -755,6 +755,8 @@ python tools/product_test.py                 # automatic: no person needed, ~5 m
 python tools/product_test.py --interactive   # + phone, music, touch and call steps
 ```
 
+`--interactive --defer-questions` lets the tester follow the whole sequence at their own pace and answer the yes/no questions at the end (used when the test is driven remotely). `--skip-touch` answers and hangs up calls on the phone and marks the touch steps skipped.
+
 | Stage | Automatic | Interactive adds |
 | --- | --- | --- |
 | 1. build | `hfp_mic_test` and `pipeline_check` build, no warnings in `main/`, app size | |
@@ -781,10 +783,11 @@ Output goes to `test_reports/`: `product_test_<date>.md` (tracked; Bluetooth add
 | Stage | Result | Evidence |
 | --- | --- | --- |
 | Reconnect at power-on (2026-09-25) | Pass | No phone hard-coded; rotated through 3 paired phones every 15 s |
+| Interactive product test (2026-09-25) | Pass, touch skipped | 31 pass / 0 fail: beep, music + title on screen, incoming call + caller on screen, call audio both ways (mSBC); `test_reports/product_test_20260925_1313.md` |
 | Automated product test (2026-09-25) | Pass | `tools/product_test.py`, all automatic checks; see `test_reports/` |
-| Touch pad (2026-09-25) | Built, not confirmed | Calibrates (baseline \~1810); no gesture captured yet |
+| Touch pad (2026-09-25) | Fail / not confirmed | Calibrates (baseline \~1810), but a tap was not detected within 3 min; left for later |
 | Temperature on OLED (2026-09-25) | Pass | 26 °C / 65 %; first 1–2 reads during BT start-up fail the checksum and are skipped |
-| Caller number / name (2026-09-25) | Number pass; name needs contact access | One phone sent a 620-contact phone book (500 loaded under the old table limit, now up to 1500); POCO F4 refused PBAP until contact sharing is allowed |
+| Caller number / name (2026-09-25) | Pass | Interactive test: caller found in contacts. Earlier: | One phone sent a 620-contact phone book (500 loaded under the old table limit, now up to 1500); POCO F4 refused PBAP until contact sharing is allowed |
 | Music titles (2026-09-25) | Pass | Title and artist on every track change; calls interrupt and music resumes |
 | Music on speaker (2026-09-25) | Pass | A2DP 44.1 kHz stereo → mono → MAX98357A, heard clearly |
 | Real call, both ways (2026-09-25) | Pass | Caller heard on the MAX98357A; mic heard by the caller |
@@ -799,8 +802,7 @@ Output goes to `test_reports/`: `product_test_<date>.md` (tracked; Bluetooth add
 
 ### Not yet tested
 
-- [ ] Touch gestures on hardware: tap to answer / hang up / play / pause, long press to reject
-- [ ] Caller name on a phone that allows contact sharing (lookup tested on the PC with sample vCards)
+- [ ] Touch gestures on hardware: a tap was not detected in the interactive test. Log the live touch reading to see how far it drops, then retune `PRESS_RATIO` (or use a bigger pad / a TTP223 module)
 - [ ] `sensor_hub` with a phone: pairing, 5 s pushes, `GET`
 
 ## 12. Git workflow and history
@@ -844,7 +846,7 @@ Fast-forward merges keep history linear with no merge commits.
 
 ## 13. Known issues, troubleshooting, next steps
 
-`hfp_mic_test` is feature-complete for calls, music and display. The open items are confirming the touch gestures and the DHT11 reads that fail while the radio is busy.
+`hfp_mic_test` passed the full interactive product test for calls, music, caller display and temperature. The open item is the touch pad: it calibrates but did not detect a tap.
 
 ### Known issues
 
@@ -881,8 +883,7 @@ Fast-forward merges keep history linear with no merge commits.
 
 ### Next steps
 
-- [ ] Run `tools/product_test.py --interactive` with a phone: confirms touch gestures, caller name, audio by ear
-- [ ] Tune `PRESS_RATIO` in `touch_ctl.c` if touches are missed or false
+- [ ] Fix touch detection, then run `tools/product_test.py --interactive` without `--skip-touch`
 - [ ] Optional: RMT-based DHT11 driver shared across projects
 - [ ] Optional: volume up/down on a second touch pad (GPIO15, T3)
 - [ ] Optional: recording to the PC over Wi-Fi, or to an SD card
