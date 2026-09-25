@@ -11,7 +11,8 @@ ESP32 + FreeRTOS test projects, built against ESP-IDF.
 | [`dht11_temperature`](dht11_temperature/) | Reads temperature/humidity from a DHT11 sensor |
 | [`hw_verify`](hw_verify/) | Flashable firmware that checks DHT11, OLED (I2C), and an I2S mic are wired correctly on the breadboard, printing pass/fail results over serial |
 | [`sensor_hub`](sensor_hub/) | DHT11 → OLED (LVGL) → Bluetooth SPP pipeline: shows readings on the OLED and pushes them to a paired phone every 5s (send `GET` for an immediate reading) |
-| [`hfp_mic_test`](hfp_mic_test/) | Bluetooth Hands-Free client that auto-connects to a known phone and feeds the I2S mic into calls, plus A2DP sink / AVRCP controls |
+| [`hfp_mic_test`](hfp_mic_test/) | Bluetooth headset product: calls (I2S mic + MAX98357A speaker), music, caller name / song title / temperature on the OLED, touch pad for answer / hang up / play / pause. Reconnects to the last phone at power-on; nothing to configure after flashing |
+| [`pipeline_check`](pipeline_check/) | Whole-board hardware check without a phone: DHT11, OLED, mic, MAX98357A beep with pin readback |
 
 For the full walkthrough (wiring, setup from scratch, every file, the
 Bluetooth profiles and audio pipelines, commands, test results and

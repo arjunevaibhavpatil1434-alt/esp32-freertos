@@ -27,15 +27,22 @@ swapping WS/SCK and reseating SD. Moving to WS=GPIO25, SCK=GPIO26, SD=GPIO32
 fixed it immediately — real signal with a power-on transient decaying to a
 steady noise floor. Avoid reusing GPIO5/18/19 breadboard rows for this mic.
 
-Later WS moved again, from GPIO25 to GPIO33, because GPIO25 is one of only
-two DAC pins and `hfp_mic_test` uses it for speaker output.
+Later WS moved again, from GPIO25 to GPIO33, to free GPIO25 for the speaker.
 
-## Speaker (hfp_mic_test only)
+## Speaker and touch (hfp_mic_test, pipeline_check)
+
+The speaker is a MAX98357A I2S amplifier. It needs all three I2S signals;
+an analog DAC signal on DIN gives silence. `hw_verify` doesn't test it: use
+`pipeline_check`, which beeps and reads the three pins back.
 
 | Component | Signal | ESP32 GPIO | Notes |
 |---|---|---|---|
-| Powered speaker, 3.5mm AUX in | TIP + RING | GPIO25 (DAC ch 0) | Through a 1–10µF DC-blocking cap (+ toward ESP32) and ~1kΩ series resistor |
-| Powered speaker, 3.5mm AUX in | SLEEVE | GND | |
+| MAX98357A | BCLK | GPIO27 | I2S0 |
+| MAX98357A | LRC | GPIO14 | I2S0 |
+| MAX98357A | DIN | GPIO25 | I2S0 |
+| MAX98357A | SD | 3V3 | Low or floating = amp off |
+| MAX98357A | VIN / GND | VIN (5 V) / GND | |
+| Touch pad | T4 | GPIO13 | Built-in capacitive touch; wire to foil or copper tape |
 
 ## Running the test
 

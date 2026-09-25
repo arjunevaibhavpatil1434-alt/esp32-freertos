@@ -17,23 +17,25 @@ This repo holds six ESP-IDF firmware projects for one ESP32 on a breadboard. Tog
 | `hw_verify` | Breadboard wiring self-test: DHT11, OLED, mic | Passed on hardware |
 | `bluetooth_test` | Classic BT SPP echo server | pytest passed on hardware |
 | `sensor_hub` | DHT11 → OLED → Bluetooth SPP pipeline | Passed on hardware (after DHT11 fix) |
-| `hfp_mic_test` | Hands-free client: mic into calls, call audio to speaker | Mic verified on a real call; speaker untested |
+| `hfp_mic_test` | Bluetooth headset product: calls, music, caller/track display, touch control | Calls, music, display verified on hardware (2026-09-25); touch gestures not yet confirmed |
+| `pipeline_check` | Whole-board hardware check: DHT11, OLED, mic, MAX98357A speaker, pin readback, speaker→mic loopback | Passed on hardware except the loopback (mic too far from speaker) |
 
 ```mermaid
 flowchart LR
     DHT[DHT11<br/>GPIO4] --> ESP[ESP32<br/>FreeRTOS + Bluedroid]
     MIC[INMP441 mic<br/>I2S1: GPIO33/26/32] --> ESP
     ESP --> OLED[SSD1306 OLED<br/>I2C 0x3C]
-    ESP --> DAC[GPIO25 DAC<br/>to amp/speaker]
+    ESP --> AMP[MAX98357A I2S amp<br/>I2S0: GPIO27/14/25]
+    TCH[Touch pad<br/>GPIO13 T4] --> ESP
     ESP <-->|SPP: readings + GET| PH1[Phone<br/>serial terminal]
-    ESP <-->|HFP + A2DP + AVRCP + PBAP| PH2[POCO F4<br/>calls and music]
+    ESP <-->|HFP + A2DP + AVRCP + PBAP| PH2[Any paired phone<br/>calls and music]
 ```
 
-Sensors and the mic feed into the ESP32. Readings go out to the OLED and over SPP; call audio goes both ways over HFP.
+Sensors, the mic and the touch pad feed into the ESP32. Readings go to the OLED (and over SPP in `sensor_hub`); call audio goes both ways over HFP, and music comes in over A2DP to the amp.
 
 ## 2. Hardware and wiring
 
-Every part shares the ESP32's 3.3 V and GND. The pin map below is the one currently wired and used by the firmware; the mic WS moved from GPIO25 to GPIO33 on 2026-09-24 so GPIO25 could become the speaker output.
+Every part shares the ESP32's GND. Everything runs from 3.3 V except the MAX98357A amp, which takes 5 V from the ESP32's VIN pin. The pin map below is the one currently wired and used by the firmware.
 
 ### Bill of materials
 
@@ -43,9 +45,9 @@ Every part shares the ESP32's 3.3 V and GND. The pin map below is the one curren
 | DHT11 temperature/humidity sensor | dht11\_temperature, hw\_verify, sensor\_hub | Single-wire, internal pull-up |
 | SSD1306/SH1106 128×64 OLED, I2C | hw\_verify, sensor\_hub | Address `0x3C` |
 | INMP441 I2S MEMS mic | hw\_verify, hfp\_mic\_test | 24-bit, left channel |
-| Speaker path (pick one) | hfp\_mic\_test | Powered AUX speaker, or PAM8403 amp + 4 Ω speaker |
-| 1–10 µF capacitor + 1 kΩ resistor | Speaker path | DC block and level drop for AUX / amp input |
-| Android phone (POCO F4) | bluetooth\_test, sensor\_hub, hfp\_mic\_test | Host PC has no Bluetooth adapter |
+| MAX98357A I2S class-D amp + 4–8 Ω speaker | hfp\_mic\_test, pipeline\_check | Digital I2S input; 3 W; gain pin left open = 9 dB |
+| Touch pad: wire end, foil or copper tape (\~2×2 cm) | hfp\_mic\_test | Uses the ESP32's built-in capacitive touch; no extra part |
+| Android phone (any; tested with POCO F4 and others) | bluetooth\_test, sensor\_hub, hfp\_mic\_test | Host PC has no Bluetooth adapter |
 
 ### Pin map
 
@@ -58,21 +60,30 @@ Every part shares the ESP32's 3.3 V and GND. The pin map below is the one curren
 | INMP441 | SCK (bit clock) | GPIO26 |  |
 | INMP441 | SD (data) | GPIO32 |  |
 | INMP441 | L/R | GND | Selects left slot |
-| Speaker | Audio out | GPIO25 | DAC channel 0, 8-bit |
+| MAX98357A | BCLK | GPIO27 | I2S0 bit clock |
+| MAX98357A | LRC | GPIO14 | I2S0 word select |
+| MAX98357A | DIN | GPIO25 | I2S0 data out |
+| MAX98357A | SD | 3V3 | Must be high or the amp stays off; selects the left channel |
+| MAX98357A | GAIN | not connected | 9 dB |
+| MAX98357A | VIN / GND | VIN (5 V) / GND | |
+| Touch pad | T4 | GPIO13 | Built-in capacitive touch; keep the wire short and away from GPIO27/14 |
 
-GPIO5, 18 and 19 are avoided for the mic: those breadboard rows gave garbage readings in the past.
+GPIO5, 18 and 19 are avoided for the mic: those breadboard rows gave garbage readings in the past. GPIO0 and GPIO12 are avoided for touch: they are boot-strap pins.
 
-### Speaker wiring options
+### Speaker wiring (MAX98357A)
 
-1. **Powered speaker with AUX in** (no purchase): GPIO25 → 1–10 µF cap (+ toward ESP32) → 1 kΩ → plug TIP and RING; GND → SLEEVE.
-2. **PAM8403 amp + 4 Ω 5 W speaker** (planned): GPIO25 → 1 µF cap → L-in; GND → GND; ESP32 5V/VIN → 5V; speaker on L+ / L−.
-3. **Bare 4 Ω speaker, no amp** (check only, very quiet): GPIO25 → 100 µF cap (+ toward ESP32) → 100 Ω → speaker +; GND → speaker −. Never connect it without the capacitor.
+The MAX98357A is a digital amplifier: it takes I2S (bit clock, word clock, data), not an analog signal, so it needs all three signal wires. An analog signal on DIN alone gives silence.
 
 ```text
-GPIO25 ──[+ cap −]──[resistor]──┬── TIP  (left)
-                                └── RING (right)
-GND ─────────────────────────────── SLEEVE (ground)
+ESP32 GPIO27 ──── BCLK
+ESP32 GPIO14 ──── LRC        MAX98357A ──(+ / −)── speaker
+ESP32 GPIO25 ──── DIN
+ESP32 3V3    ──── SD         (amp on, left channel)
+ESP32 VIN    ──── VIN        (5 V)
+ESP32 GND    ──── GND
 ```
+
+The firmware sends the same mono audio on both I2S slots, so any SD channel setting plays it. Music is mixed down from stereo to mono for the same reason.
 
 ## 3. Setting up from scratch
 
@@ -189,18 +200,30 @@ esp32-freertos/
 │       ├── dht11.c  ·  dht11.h     # critical-section version
 │       └── ui.c  ·  ui.h           # LVGL screen
 │
-└── hfp_mic_test/                  # 6. hands-free: mic + speaker
-    ├── CMakeLists.txt  ·  sdkconfig  ·  sdkconfig.defaults
+├── hfp_mic_test/                  # 6. Bluetooth headset product
+│   ├── CMakeLists.txt  ·  sdkconfig  ·  sdkconfig.defaults (complete build config)
+│   └── main/
+│       ├── CMakeLists.txt
+│       ├── Kconfig.projbuild      # device name, optional pinned phone, SSP, console
+│       ├── main.c                 # BT init, reconnect to last phone, DHT11 task
+│       ├── bt_app_core.c/.h       # app task + message queue
+│       ├── bt_app_hf.c/.h         # HFP client, mic uplink, call audio downlink
+│       ├── bt_app_av.c/.h         # A2DP music to the amp, AVRCP titles + control
+│       ├── bt_app_pbac.c/.h       # PBAP phonebook client
+│       ├── contacts.c/.h          # number -> name table for the caller display
+│       ├── spk_i2s.c/.h           # MAX98357A I2S driver, shared by calls and music
+│       ├── oled_status.c/.h       # status screen
+│       ├── touch_ctl.c/.h         # touch pad gestures
+│       ├── dht11.c/.h             # critical-section DHT11 driver
+│       ├── app_hf_msg_set.c/.h    # console commands for HFP
+│       └── app_av_msg_set.c/.h    # console commands for A2DP/AVRCP
+│
+└── pipeline_check/                # 7. whole-board hardware check, no phone
+    ├── CMakeLists.txt  ·  sdkconfig
     └── main/
         ├── CMakeLists.txt
-        ├── Kconfig.projbuild      # peer name/address, SSP, console
-        ├── main.c                 # BT init, GAP, discovery, auto-connect
-        ├── bt_app_core.c/.h       # app task + message queue
-        ├── bt_app_hf.c/.h         # HFP client, mic uplink, DAC speaker
-        ├── bt_app_av.c/.h         # A2DP sink + AVRCP controller
-        ├── bt_app_pbac.c/.h       # PBAP phonebook client
-        ├── app_hf_msg_set.c/.h    # console commands for HFP
-        └── app_av_msg_set.c/.h    # console commands for A2DP/AVRCP
+        ├── main.c                 # DHT11, OLED, mic probe, amp pin readback, beep, loopback
+        └── dht11.c/.h
 ```
 
 ### What each file type does
@@ -387,61 +410,89 @@ With Bluetooth and LVGL running, interrupts arrived in the middle of the \~4 ms 
 
 Pairing is the same as `bluetooth_test`: SSP auto-confirm, legacy PIN `1234`.
 
-## 8. hfp\_mic\_test: Bluetooth hands-free with mic and speaker
+## 8. hfp\_mic\_test: Bluetooth headset product
 
-The ESP32 acts as a car-kit style hands-free device for the POCO F4. It carries the call: the INMP441 mic feeds your voice into the call, and GPIO25 plays the other person's voice. The mic path was verified on a real 56 s call (the other person heard you clearly). The speaker path is built but untested, pending an amplifier.
+The ESP32 is a Bluetooth headset with a screen. Paired with a phone it carries calls (INMP441 mic up, MAX98357A speaker down), plays music, shows the caller or the song and the room temperature on the OLED, and takes a touch pad for answer / hang up / play / pause. Verified on hardware on 2026-09-25: calls both ways, music, caller number, track titles, temperature display, reconnect. Touch gestures are built but not yet confirmed on hardware.
+
+### First use and every power-on
+
+Flash once; nothing else to configure.
+
+1. **First time:** on the phone, pair with `ESP_HFP_HF` (PIN `0000` if asked). Allow contact access when Android asks, for caller names.
+2. **Every power-on:** the board reconnects by itself to the phone that connected last (saved in NVS). If none is saved, it tries each paired phone in turn. It tries every 15 s, 8 times, then waits for the phone to connect. Any phone can still pair or connect in at any time.
+3. Pairings and the last-used phone survive reflashing; `idf.py erase-flash` clears them.
 
 ### Profiles running at once
 
 | Profile | ESP32 role | Used for | Source file |
 | --- | --- | --- | --- |
-| HFP 1.x | Hands-Free (HF client) | Calls: ring, answer, audio both ways | `bt_app_hf.c` |
-| A2DP | Sink | Music from the phone (bytes counted, not played) | `bt_app_av.c` |
-| AVRCP | Controller | Play/pause/next/prev, track title/artist/album | `bt_app_av.c` |
-| PBAP | Client (PCE) | Pull the phone book (`telecom/pb.vcf`) | `bt_app_pbac.c` |
+| HFP 1.x | Hands-Free (HF client) | Calls: ring, answer, audio both ways, caller number | `bt_app_hf.c` |
+| A2DP | Sink | Music to the speaker | `bt_app_av.c` |
+| AVRCP | Controller | Play/pause, track title and artist, track-change notifications | `bt_app_av.c` |
+| PBAP | Client (PCE) | Phone book → number-to-name table for the caller display | `bt_app_pbac.c`, `contacts.c` |
 
-### Key configuration (`sdkconfig.defaults`)
+### Source files
+
+| File | Does |
+| --- | --- |
+| `main.c` | Start-up, reconnect-to-last-phone logic, DHT11 task |
+| `bt_app_hf.c` | HFP events, mic uplink, call audio downlink |
+| `bt_app_av.c` | A2DP music to the amp, AVRCP titles and control |
+| `bt_app_pbac.c`, `contacts.c` | Phone book download and caller-name lookup (kept in RAM, never logged) |
+| `spk_i2s.c` | The one MAX98357A driver, shared by calls (16 kHz) and music (44.1/48 kHz) |
+| `oled_status.c` | Status screen: 5×7 ASCII font, scrolling text, retries until the panel answers |
+| `touch_ctl.c` | Touch pad on GPIO13: self-calibrating, tap / long-press gestures |
+| `dht11.c` | DHT11 driver (the critical-section version from `sensor_hub`) |
+
+### Configuration (`sdkconfig.defaults`)
+
+A fresh clone builds the same firmware from `sdkconfig.defaults` alone.
 
 ```text
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y             # the module has 4 MB
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y   # 1.5 MB app partition (app is ~1 MB)
 CONFIG_BT_ENABLED=y  CONFIG_BT_BLE_ENABLED=n  CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=1     # one SCO/eSCO voice link
 CONFIG_BT_BLUEDROID_ENABLED=y  CONFIG_BT_CLASSIC_ENABLED=y
 CONFIG_BT_HFP_ENABLE=y  CONFIG_BT_HFP_CLIENT_ENABLE=y
-CONFIG_BT_PBAC_ENABLED=y  CONFIG_BT_A2DP_ENABLE=y
 CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y         # voice over HCI to the app, not PCM pins
-CONFIG_EXAMPLE_PEER_DEVICE_NAME="POCO F4"
-CONFIG_EXAMPLE_PEER_DEVICE_ADDR="ac:1e:9e:f2:b1:c0"
+CONFIG_BT_PBAC_ENABLED=y  CONFIG_BT_A2DP_ENABLE=y
+CONFIG_EXAMPLE_LOCAL_DEVICE_NAME="ESP_HFP_HF"
+CONFIG_EXAMPLE_PEER_DEVICE_ADDR=""          # no phone hard-coded
+CONFIG_EXAMPLE_PEER_DEVICE_NAME=""
 ```
 
-`CONFIG_BT_HFP_WBS_ENABLE=y` (wideband speech) is on in `sdkconfig`, so phones negotiate mSBC (16 kHz). `CONFIG_BT_HFP_USE_EXTERNAL_CODEC` is off: Bluedroid encodes/decodes CVSD and mSBC itself.
+Wideband speech (mSBC, 16 kHz) is on by default in this ESP-IDF, so phones negotiate it. `CONFIG_BT_HFP_USE_EXTERNAL_CODEC` is off: Bluedroid encodes/decodes CVSD and mSBC itself.
 
 ### Kconfig options (`main/Kconfig.projbuild`, menu "HFP Example Configuration")
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `EXAMPLE_LOCAL_DEVICE_NAME` | `ESP_HFP_HF` | Name phones see when pairing |
+| `EXAMPLE_PEER_DEVICE_ADDR` | empty | Pin one phone by address; empty = last-used phone, then any paired phone |
+| `EXAMPLE_PEER_DEVICE_NAME` | empty | Only with no paired phone: discover a phone by this exact name |
 | `EXAMPLE_SSP_ENABLED` | y | Secure Simple Pairing; off = legacy PIN only |
-| `EXAMPLE_PEER_DEVICE_NAME` | `ESP_HFP_AG` | Phone name to find by discovery |
-| `EXAMPLE_PEER_DEVICE_ADDR` | empty | Phone address for direct connect; empty = discovery only; malformed = warning, ignored |
 | `EXAMPLE_ENABLE_CONSOLE_REPL` | y | UART console with the commands below |
 
 ### Connection flow
 
-1. `app_main`: NVS → controller (Classic) → Bluedroid → `bt_app_task_start_up()` (queue of 10, task `BtAppT`, 4 KB) → console REPL.
-2. Stack-up event: GAP callback, HFP client init, PBAP init, A2DP sink + AVRCP init, device name `ESP_HFP_HF`, PIN `0000` fixed for legacy, connectable + discoverable.
-3. If `EXAMPLE_PEER_DEVICE_ADDR` parses, call `esp_hf_client_connect()` on it straight away.
-4. In parallel, start a 30-unit (\~38 s) general inquiry; on a result whose name equals `EXAMPLE_PEER_DEVICE_NAME`, cancel discovery and connect. Retries forever if not found.
-5. HFP goes `connected` → `slc_connected` (service-level connection). The phone now lists the ESP32 as a call audio route; PBAP connects and pulls the phone book.
-6. The phone connects A2DP + AVRCP; AVRCP fetches current track metadata.
+1. `app_main`: NVS → controller (Classic) → Bluedroid → OLED task → DHT11 task (core 1) → touch task (core 1) → `bt_app_task_start_up()` → console REPL.
+2. Stack-up event: GAP, HFP client, PBAP, A2DP sink + AVRCP; device name, PIN `0000`, connectable + discoverable.
+3. Pick the reconnect target: configured address → last-used phone from NVS (if still paired) → each paired phone in turn. Page it every 15 s, 8 tries. The timer drives the retries, because a phone that is off doesn't always produce a disconnect event.
+4. HFP goes `connected` → `slc_connected`. The phone is saved as last-used; PBAP pulls the phone book (VERSION, FN, N, TEL only).
+5. The phone connects A2DP + AVRCP; AVRCP reads the notification capabilities, registers for track changes and fetches title and artist.
+6. If a live link drops, a fresh round of 8 retries starts.
 
 ```mermaid
 sequenceDiagram
     participant E as ESP32 (HF)
-    participant P as POCO F4 (AG)
+    participant P as Phone (AG)
     E->>P: ACL + RFCOMM connect (HFP)
     E->>P: AT commands (BRSF, CIND, CMER...)
     P-->>E: SLC connected, indicators
+    E->>P: PBAP pull telecom/pb.vcf
     P->>E: RING + CLIP (incoming call)
-    Note over E,P: answered on phone
+    Note over E: name from phone book on OLED
     P->>E: eSCO setup, codec mSBC
     E->>P: mic audio (16 kHz)
     P->>E: far-end audio (16 kHz)
@@ -464,34 +515,60 @@ flowchart LR
 
 The mic task pushes PCM and calls `esp_hf_client_outgoing_data_ready()`; Bluedroid pulls fixed-size frames through `outgoing_cb` and encodes them.
 
-### Downlink: call → speaker (untested)
+### Downlink: call and music → speaker
 
 ```mermaid
 flowchart LR
     P[Phone: other person] --> I[incoming_cb<br/>16-bit PCM]
-    I -->|to 8-bit unsigned<br/>CVSD: repeat x2| Q[Ring buffer<br/>4096 B ~250 ms]
+    I -->|CVSD: repeat x2| Q[Ring buffer<br/>8192 B ~250 ms]
     Q --> T[spk_play_task<br/>prio 6]
-    T --> A[DAC ch0 GPIO25<br/>16 kHz, APLL clock]
-    A --> S[Amp / AUX speaker]
+    T --> S[spk_i2s 16 kHz]
+    A[A2DP SBC decoded<br/>44.1 kHz stereo] -->|mix to mono| S2[spk_i2s 44.1 kHz]
+    S --> AMP[MAX98357A<br/>I2S0 27/14/25]
+    S2 --> AMP
 ```
 
-The callback never blocks: if the queue is full, audio is dropped with a rate-limited warning. On underrun the task writes mid-scale (128) silence.
+Calls win: while call audio is up, music data is dropped, and the amp switches to 16 kHz; when the call ends, music switches it back. The call callback never blocks; the A2DP callback blocks at most 100 ms on the I2S write.
+
+### Display (SSD1306, 8 text rows)
+
+```text
+BT CONNECTED           <- or BT WAITING
+INCOMING CALL          <- or CALLING / IN CALL (HD) / MUSIC / NO CALL
+Ravi Kumar             <- caller name, or song title (scrolls if long)
++919876543210          <- caller number, or artist
+────────────────────
+Temp      26 °C        <- DHT11 every 5 s; "--" until the first good read
+Humidity  65 %
+```
+
+`MUSIC` shows while A2DP packets arrive (not from start/stop events, which can be missed). The last title stays up while paused. Non-ASCII characters show as `?`. Outgoing calls get their number from `AT+CLCC`, since there is no CLIP.
+
+### Touch pad (GPIO13, T4)
+
+| State | Tap (< 1 s) | Long press (1 s, fires while held) |
+| --- | --- | --- |
+| Ringing | Answer | Reject |
+| Dialing / in call | Hang up | Hang up |
+| Otherwise | Music play / pause | — |
+
+The pad calibrates during the first \~2 s after power-on or reset: don't touch it then. Touched = the filtered reading below 85 % of the baseline for 2 polls (20 ms apart); released above 92 %. The baseline follows slow drift while untouched.
 
 ### Audio lifecycle
 
 | Event | Action |
 | --- | --- |
-| Audio state `connected` (CVSD) or `connected_msbc` | Register data callbacks, lazy-init I2S mic and DAC once, set `s_audio_wideband`, set `s_audio_active` |
+| Audio state `connected` (CVSD) or `connected_msbc` | Register data callbacks, lazy-init the I2S mic, set the amp to 16 kHz, set `s_audio_active` |
 | During call | Mic task and speaker task run; buffers flow |
-| Audio state `disconnected` | Clear `s_audio_active`, drain both ring buffers; hardware stays initialised for the next call |
+| Audio state `disconnected` | Clear `s_audio_active`, drain both ring buffers; hardware stays initialised |
 | Audio state `connected_lc3` | Logged as an error: LC3 needs the external-codec path |
 
 ### Hardware constraints behind the design
 
-- **DAC pins:** only GPIO25 and GPIO26 can output from the DAC, which is why the mic's WS moved to GPIO33.
-- **I2S0 is taken:** the DAC's DMA always uses I2S0 on ESP32, so the mic is pinned to `I2S_NUM_1`.
-- **DAC clock:** the default clock can't go below 19.6 kHz, so the DAC uses the APLL at exactly 16 kHz.
-- **Resolution:** the DAC is 8-bit, so expect AM-radio quality.
+- **Two I2S ports:** the mic has I2S1 and the amp I2S0, so each keeps its own clocks.
+- **MAX98357A SD pin:** has an internal pull-down, so it must go to 3V3 or the amp stays in shutdown.
+- **DHT11 timing:** a read masks interrupts for \~4 ms, so its task runs on core 1, away from the Bluetooth controller on core 0.
+- **Touch pins:** most touch-capable pins are already used; GPIO13 is the free one that isn't a boot-strap pin.
 
 ### Console commands (UART, prompt `hfp_hf>`)
 
@@ -668,28 +745,35 @@ flowchart LR
 2. **Wiring:** flash `hw_verify`; all three RESULT lines must pass.
 3. **Sensor pipeline:** flash `sensor_hub`, capture 60 s; expect SPP server up, discoverable, and most reads OK (the first read during BT startup may fail).
 4. **SPP:** run the `bluetooth_test` pytest.
-5. **HFP boot:** flash `hfp_mic_test`; expect a single boot, all profiles `Init Complete`, direct connect attempt to the configured address.
-6. **Real call:** keep a serial capture running, pair the phone, place or answer a call. Check for `audio state connected_msbc`, `mic: streaming to call at 16kHz (mSBC)`, no `rb send fail`, no panic. Ask the other person how it sounds.
+5. **Whole board, no phone:** flash `pipeline_check`; expect DHT11 OK, OLED OK, `MIC SIGNAL`, all three `[SPK pin]` lines `toggling OK`, and an audible 1 kHz beep (1 s on, 1 s off).
+6. **HFP boot:** flash `hfp_mic_test`; expect a single boot, all profiles `Init Complete`, `status display on at 0x3C`, `TOUCH: pad on GPIO13 ready`, and `Reconnect target: ...` if a phone is paired.
+7. **Real call:** keep a serial capture running, pair the phone, place or answer a call. Check for `audio state connected_msbc`, `mic: streaming to call at 16kHz (mSBC)`, no `rb send fail`, no panic. Ask the other person how it sounds.
 
-### Results on record (2026-09-24)
+### Results on record
 
 | Stage | Result | Evidence |
 | --- | --- | --- |
+| Reconnect at power-on (2026-09-25) | Pass | No phone hard-coded; rotated through 3 paired phones every 15 s |
+| Touch pad (2026-09-25) | Built, not confirmed | Calibrates (baseline \~1810); no gesture captured yet |
+| Temperature on OLED (2026-09-25) | Pass | 26 °C / 65 %; first 1–2 reads during BT start-up fail the checksum and are skipped |
+| Caller number / name (2026-09-25) | Number pass; name needs contact access | One phone sent a 620-contact phone book (500 loaded under the old table limit, now up to 1500); POCO F4 refused PBAP until contact sharing is allowed |
+| Music titles (2026-09-25) | Pass | Title and artist on every track change; calls interrupt and music resumes |
+| Music on speaker (2026-09-25) | Pass | A2DP 44.1 kHz stereo → mono → MAX98357A, heard clearly |
+| Real call, both ways (2026-09-25) | Pass | Caller heard on the MAX98357A; mic heard by the caller |
+| pipeline\_check (2026-09-25) | Pass except loopback | Beep heard; all 3 amp pins toggling; mic signal; loopback fails (mic far from speaker) |
 | Real call, mic uplink | Pass: other person heard clearly | POCO F4 incoming call, mSBC, \~56 s, 0 overruns, 0 crashes |
 | hfp\_mic\_test boot | Pass | 1 boot, HFP/A2DP/AVRCP init complete |
 | bluetooth\_test pytest | Pass | 1 passed in 12.17 s |
 | sensor\_hub, after DHT11 fix | Pass | 12/13 reads over 65 s; later runs 5/6 and 4/5 |
 | sensor\_hub, before fix | Fail | 0/8 reads, `Bit 38/39 LOW timeout` |
 | hw\_verify | Pass | DHT11 5/5, OLED at 0x3C, mic signal detected |
-| Build all 6 | Pass | 0 errors, 0 warnings |
+| Build all 6 (2026-09-24) | Pass | 0 errors, 0 warnings |
 
 ### Not yet tested
 
-- [ ] Speaker downlink on GPIO25 (needs amp or powered AUX speaker); look for `spk: DAC ready on GPIO25 at 16000 Hz`
-- [ ] Mic on its new WS pin, GPIO33 (re-run `hw_verify`, then a call)
+- [ ] Touch gestures on hardware: tap to answer / hang up / play / pause, long press to reject
+- [ ] Caller name on a phone that allows contact sharing (lookup tested on the PC with sample vCards)
 - [ ] `sensor_hub` with a phone: pairing, 5 s pushes, `GET`
-- [ ] OLED contents (screen not visible from the test host)
-- [ ] Outgoing call from the ESP32 console (`d <num>`)
 
 ## 12. Git workflow and history
 
@@ -711,6 +795,9 @@ Fast-forward merges keep history linear with no merge commits.
 
 | Date | Commit | Change |
 | --- | --- | --- |
+| 2026-09-25 | `5bb804b` | Add pipeline\_check: whole-board hardware check without a phone |
+| 2026-09-25 | `8019082` | hfp\_mic\_test: standalone headset product (I2S amp, music, display, touch, reconnect) |
+| 2026-09-24 | `25f247e` | Add complete project guide |
 | 2026-09-24 | `419c564` | hw\_verify: mic WS on GPIO33, document speaker wiring |
 | 2026-09-24 | `9c87da4` | hfp\_mic\_test: play far-end call audio on the GPIO25 DAC (untested) |
 | 2026-09-24 | `60f9a99` | hfp\_mic\_test: target the POCO F4 instead of the Narzo 50A |
@@ -729,20 +816,21 @@ Fast-forward merges keep history linear with no merge commits.
 
 ## 13. Known issues, troubleshooting, next steps
 
-The most urgent open item is testing the speaker once the PAM8403 amplifier arrives. After that come flash space (`hfp_mic_test` has 9% left) and moving the DHT11 driver off interrupt masking.
+`hfp_mic_test` is feature-complete for calls, music and display. The open items are confirming the touch gestures and the DHT11 reads that fail while the radio is busy.
 
 ### Known issues
 
 | Issue | Impact | Mitigation |
 | --- | --- | --- |
-| `hfp_mic_test` app is 91% of its 1 MB partition | Little room for new features | Bigger partition table (4 MB chip, header says 2 MB) or trim features |
-| DHT11 read masks interrupts \~4 ms every 5 s | Possible BT hiccups | Move to RMT peripheral |
-| DHT11 fix only in `sensor_hub` | Other copies fail if BT is added | Share one driver component |
-| First DHT11 read fails during BT startup | Cosmetic | Absorbed by 3-failure tolerance |
-| 8-bit DAC | AM-radio-level sound | MAX98357A I2S amp (firmware change) |
-| Phone Bluetooth addresses committed to a public repo | Minor privacy | Move to an untracked config; history keeps old values |
+| DHT11 reads can fail while Bluetooth is paging (start-up, reconnect tries) | Reading skipped; display keeps the last good value | Checksum rejects bad frames; an RMT-based driver would remove the cause |
+| DHT11 read masks interrupts \~4 ms every 5 s | Runs on core 1, away from the BT controller | Move to the RMT peripheral |
+| OLED sometimes misses the first probe after power-on | Display appears \~1–2 s late | Display task retries every second |
+| Font is ASCII only | Names in other scripts show as `?` | Needs a Unicode font |
+| Phone book limited by free RAM (up to 1500 numbers, names cut to 23 chars) | Very large phone books are partly loaded | Logged as "out of memory, rest skipped" |
+| Some phones refuse PBAP until contact sharing is allowed | Number only, no name | Allow contacts in the phone's Bluetooth device settings |
+| `speaker_test` still drives the GPIO25 DAC | Silent on the MAX98357A | Use `pipeline_check` for speaker tests |
+| Old commits contain a phone Bluetooth address | Minor privacy | Removed from current config; history keeps it |
 | Some serial log lines garbled | Cosmetic | None yet |
-| Image header 2 MB vs 4 MB flash detected | Warning at boot | Set flash size to 4 MB in `menuconfig` |
 
 ### Troubleshooting
 
@@ -750,8 +838,12 @@ The most urgent open item is testing the speaker once the PAM8403 amplifier arri
 | --- | --- | --- |
 | Flash fails: "No more data to read from the serial port" | USB link dropped mid-write | Retry with `-b 115200`; shorter/better cable |
 | Permission denied on `/dev/ttyUSB0` | User not in `dialout` | `sudo usermod -aG dialout $USER`, log in again |
-| Pairing failed, status N | Stale bonding keys | Forget device on phone; `idf.py erase-flash` |
-| ESP32 connects to the wrong phone | Old name/address in config | Set `EXAMPLE_PEER_DEVICE_NAME` / `_ADDR`, rebuild |
+| Pairing failed, status N (`Authentication fail reason 5`) | Stale bonding keys | Forget device on phone and pair again; or `idf.py erase-flash` |
+| ESP32 connects to the wrong phone | Another paired phone answered first | Connect the wanted phone once (it becomes last-used), or pin it with `EXAMPLE_PEER_DEVICE_ADDR` |
+| Phone can't find `ESP_HFP_HF` | A test firmware (`pipeline_check`) is flashed | Flash `hfp_mic_test` |
+| Silent speaker, SPK activity in the log | MAX98357A SD low, or BCLK/LRC not wired | SD to 3V3; wire BCLK→27, LRC→14; run `pipeline_check` |
+| Touch never triggers | Pad touched during calibration, or wire too long | Reset with the hand away; shorter wire, bigger pad |
+| Touch triggers by itself | Pad wire near the amp's clock wires | Route the GPIO13 wire away from GPIO27/14 |
 | DHT11 `Bit 38/39 LOW timeout` | Interrupts during bit frame | Use the critical-section driver from `sensor_hub` |
 | Other person hears choppy, fast voice | Mic fed at 8 kHz on an mSBC call | Fixed in `9d5f0ca` |
 | No mic audio after rewiring | WS not on GPIO33 | Move WS jumper; run `hw_verify` |
@@ -760,9 +852,7 @@ The most urgent open item is testing the speaker once the PAM8403 amplifier arri
 
 ### Next steps
 
-- [ ] Buy a PAM8403 amplifier; wire GPIO25 → 1 µF → L-in, GND, 5V, speaker on L+/L−
-- [ ] Move mic WS to GPIO33 and re-run `hw_verify`
-- [ ] Real call with serial capture: confirm speaker and re-pinned mic
-- [ ] Commit results; update this doc's section 11
+- [ ] Confirm touch gestures on hardware; tune `PRESS_RATIO` in `touch_ctl.c` if needed
 - [ ] Optional: RMT-based DHT11 driver shared across projects
-- [ ] Optional: enlarge the app partition for `hfp_mic_test`
+- [ ] Optional: volume up/down on a second touch pad (GPIO15, T3)
+- [ ] Optional: recording to the PC over Wi-Fi, or to an SD card
