@@ -128,9 +128,14 @@ static bool oled_init(void)
     if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) {
         return false;
     }
-    if (i2c_master_probe(bus, OLED_ADDR, 100) != ESP_OK) {
-        ESP_LOGE(TAG, "[OLED] no reply at 0x%02X - check SDA/SCL/VCC/GND", OLED_ADDR);
-        return false;
+    /* The panel sometimes misses the first probe right after power-on. */
+    int tries = 0;
+    while (i2c_master_probe(bus, OLED_ADDR, 100) != ESP_OK) {
+        if (++tries == 5) {
+            ESP_LOGE(TAG, "[OLED] no reply at 0x%02X - check SDA/SCL/VCC/GND", OLED_ADDR);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     esp_lcd_panel_io_handle_t io;

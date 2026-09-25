@@ -37,3 +37,8 @@ CONFIG_EXAMPLE_LOCAL_DEVICE_NAME="ESP_HFP_HF"
 # CONFIG_EXAMPLE_PEER_DEVICE_ADDR="xx:xx:xx:xx:xx:xx".
 CONFIG_EXAMPLE_PEER_DEVICE_ADDR=""
 CONFIG_EXAMPLE_PEER_DEVICE_NAME=""
+# No UART debug console in the product: nobody types into it, and setting
+# it up swallows log lines other tasks print at the same moment (display
+# "on" lost in 6 of 8 boots with it, 0 of 8 without). Enable it in
+# menuconfig for the hfp_hf> commands during development.
+CONFIG_EXAMPLE_ENABLE_CONSOLE_REPL=n

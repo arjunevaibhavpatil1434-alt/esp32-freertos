@@ -351,6 +351,9 @@ static void dht_task(void *arg)
     while (1) {
         dht11_data_t d;
         if (dht11_read(DHT11_GPIO, &d) == ESP_OK) {
+            if (g_stat_temp_c < 0) {
+                ESP_LOGI(BT_HF_TAG, "DHT11: first reading %d C, %d %%", d.temperature, d.humidity);
+            }
             g_stat_temp_c = d.temperature;
             g_stat_humidity = d.humidity;
             fails = 0;
