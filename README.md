@@ -14,6 +14,10 @@ ESP32 + FreeRTOS test projects, built against ESP-IDF.
 | [`hfp_mic_test`](hfp_mic_test/) | Bluetooth headset product: calls (I2S mic + MAX98357A speaker), music, caller name / song title / temperature on the OLED, touch pad for answer / hang up / play / pause. Reconnects to the last phone at power-on; nothing to configure after flashing |
 | [`pipeline_check`](pipeline_check/) | Whole-board hardware check without a phone: DHT11, OLED, mic, MAX98357A beep with pin readback |
 
+To test a finished board end to end (build, hardware check, product boot,
+and optionally phone/music/touch/call), run `python tools/product_test.py`
+from an ESP-IDF shell; reports land in `test_reports/`.
+
 For the full walkthrough (wiring, setup from scratch, every file, the
 Bluetooth profiles and audio pipelines, commands, test results and
 troubleshooting), see [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).

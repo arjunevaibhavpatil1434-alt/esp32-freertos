@@ -218,12 +218,16 @@ esp32-freertos/
 │       ├── app_hf_msg_set.c/.h    # console commands for HFP
 │       └── app_av_msg_set.c/.h    # console commands for A2DP/AVRCP
 │
-└── pipeline_check/                # 7. whole-board hardware check, no phone
-    ├── CMakeLists.txt  ·  sdkconfig
-    └── main/
-        ├── CMakeLists.txt
-        ├── main.c                 # DHT11, OLED, mic probe, amp pin readback, beep, loopback
-        └── dht11.c/.h
+├── pipeline_check/                # 7. whole-board hardware check, no phone
+│   ├── CMakeLists.txt  ·  sdkconfig
+│   └── main/
+│       ├── CMakeLists.txt
+│       ├── main.c                 # DHT11, OLED, mic probe, amp pin readback, beep, loopback
+│       └── dht11.c/.h
+│
+├── tools/
+│   └── product_test.py            # final product test: build, hardware, boot, phone
+└── test_reports/                  # product test reports (.md tracked, raw .log ignored)
 ```
 
 ### What each file type does
@@ -572,6 +576,8 @@ The pad calibrates during the first \~2 s after power-on or reset: don't touch i
 
 ### Console commands (UART, prompt `hfp_hf>`)
 
+Off in the product build (`CONFIG_EXAMPLE_ENABLE_CONSOLE_REPL=n`): nobody types into it, and its start-up swallows log lines that other tasks print at the same moment (the display's "on" line was lost in 6 of 8 boots with it, 0 of 8 without). For development, turn on "Enable UART interactive console" in `idf.py menuconfig` → HFP Example Configuration.
+
 | Command | Action |
 | --- | --- |
 | `con` / `dis` | Connect / release the HFP link |
@@ -739,7 +745,28 @@ flowchart LR
     E --> F[6. Real call<br/>with phone]
 ```
 
-### Procedure
+### Automated product test (`tools/product_test.py`)
+
+One command runs the whole final test on the board and saves a report. Run it from an ESP-IDF shell with the board on USB:
+
+```bash
+. ~/esp/esp-idf/export.sh
+python tools/product_test.py                 # automatic: no person needed, ~5 min
+python tools/product_test.py --interactive   # + phone, music, touch and call steps
+```
+
+| Stage | Automatic | Interactive adds |
+| --- | --- | --- |
+| 1. build | `hfp_mic_test` and `pipeline_check` build, no warnings in `main/`, app size | |
+| 2. hardware | Flash `pipeline_check`: amp BCLK/LRC/DIN toggling, DHT11, OLED, mic signal, loopback (info) | "Did you hear the beep?" |
+| 3. boot | Flash `hfp_mic_test`: one clean boot, no crash, HFP/A2DP/AVRCP up, display on, touch calibrated, DHT11 reading, reconnect logic | |
+| 4. phone | skipped | Connect, music + title, touch pause/play, incoming call + caller, touch answer, audio both ways, touch hang up, long press rejects |
+
+For each step of stage 4 the script says what to do, waits for the matching log line, and asks yes/no only for what a log can't show (sound heard, screen contents). It leaves the board running `hfp_mic_test`.
+
+Output goes to `test_reports/`: `product_test_<date>.md` (tracked; Bluetooth addresses and phone numbers masked) and one raw serial `.log` per stage (git-ignored, since they contain phone addresses and caller numbers). Exit code 0 means nothing failed. Options: `--port`, `--skip-build`, `--skip-hardware`, `--report <path>`.
+
+### Procedure (manual)
 
 1. **Build:** all six projects must build with 0 errors and 0 warnings.
 2. **Wiring:** flash `hw_verify`; all three RESULT lines must pass.
@@ -754,6 +781,7 @@ flowchart LR
 | Stage | Result | Evidence |
 | --- | --- | --- |
 | Reconnect at power-on (2026-09-25) | Pass | No phone hard-coded; rotated through 3 paired phones every 15 s |
+| Automated product test (2026-09-25) | Pass | `tools/product_test.py`, all automatic checks; see `test_reports/` |
 | Touch pad (2026-09-25) | Built, not confirmed | Calibrates (baseline \~1810); no gesture captured yet |
 | Temperature on OLED (2026-09-25) | Pass | 26 °C / 65 %; first 1–2 reads during BT start-up fail the checksum and are skipped |
 | Caller number / name (2026-09-25) | Number pass; name needs contact access | One phone sent a 620-contact phone book (500 loaded under the old table limit, now up to 1500); POCO F4 refused PBAP until contact sharing is allowed |
@@ -830,7 +858,8 @@ Fast-forward merges keep history linear with no merge commits.
 | Some phones refuse PBAP until contact sharing is allowed | Number only, no name | Allow contacts in the phone's Bluetooth device settings |
 | `speaker_test` still drives the GPIO25 DAC | Silent on the MAX98357A | Use `pipeline_check` for speaker tests |
 | Old commits contain a phone Bluetooth address | Minor privacy | Removed from current config; history keeps it |
-| Some serial log lines garbled | Cosmetic | None yet |
+| Some serial log lines garbled | Cosmetic | Mostly the console's terminal probe; the console is now off by default |
+| With the UART console enabled, log lines printed while it starts are lost | Misleading logs during development | Console off in the product build |
 
 ### Troubleshooting
 
@@ -852,7 +881,8 @@ Fast-forward merges keep history linear with no merge commits.
 
 ### Next steps
 
-- [ ] Confirm touch gestures on hardware; tune `PRESS_RATIO` in `touch_ctl.c` if needed
+- [ ] Run `tools/product_test.py --interactive` with a phone: confirms touch gestures, caller name, audio by ear
+- [ ] Tune `PRESS_RATIO` in `touch_ctl.c` if touches are missed or false
 - [ ] Optional: RMT-based DHT11 driver shared across projects
 - [ ] Optional: volume up/down on a second touch pad (GPIO15, T3)
 - [ ] Optional: recording to the PC over Wi-Fi, or to an SD card

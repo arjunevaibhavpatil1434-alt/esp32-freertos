@@ -10,3 +10,7 @@ sdkconfig.old
 # Editor/OS cruft
 .vscode/
 .DS_Store
+
+# Raw serial logs from tools/product_test.py: contain phone addresses and
+# caller numbers. The .md reports beside them are redacted and tracked.
+test_reports/*.log
